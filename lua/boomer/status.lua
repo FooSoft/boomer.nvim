@@ -39,7 +39,7 @@ local function cost(c)
     end
 end
 
--- { text, highlight group } segments: "boomer", agent, model (effort), mode,
+-- { text, highlight group } segments: agent, model (effort), mode,
 -- state, queued prompts, context and cost. Missing values are skipped.
 ---@param st boomer.Status
 ---@return { [1]: string, [2]: string? }[]
@@ -49,7 +49,7 @@ function M.parts(st)
         model = model and (model .. ' (' .. st.effort .. ')') or st.effort
     end
     local state_hl = busy[st.state] and 'BoomerWinbarBusy' or bad[st.state] and 'BoomerWinbarError'
-    local parts = { { 'boomer', 'BoomerWinbarTitle' } }
+    local parts = {}
     for _, p in ipairs({
         { st.agent },
         { model },
@@ -72,7 +72,7 @@ local function escape(s)
     return (tostring(s):gsub('%%', '%%%%'))
 end
 
--- Plain text, e.g. "boomer | codex | gpt-5 (high) | running | ctx 42%".
+-- Plain text, e.g. "codex | gpt-5 (high) | running | ctx 42%".
 ---@param st boomer.Status
 function M.text(st)
     return table.concat(
@@ -83,7 +83,7 @@ function M.text(st)
     )
 end
 
--- The same in 'winbar' syntax, with highlight groups.
+-- The same in 'winbar' syntax, right-aligned with highlight groups.
 ---@param st boomer.Status
 function M.winbar(st)
     local out = {}
@@ -91,7 +91,7 @@ function M.winbar(st)
         local text = escape(p[1])
         out[#out + 1] = p[2] and ('%#' .. p[2] .. '#' .. text .. '%#BoomerWinbar#') or text
     end
-    return '%#BoomerWinbar#' .. table.concat(out, sep)
+    return '%#BoomerWinbar#%=' .. table.concat(out, sep)
 end
 
 -- The plain text, escaped for 'statusline'.

@@ -383,24 +383,22 @@ test('status rendering', function()
         context = { used = 42000, size = 100000 },
         cost = { amount = 0.5, currency = 'USD' },
     }
-    assert(st.text(s) == 'boomer | codex | gpt-5 (high) | running | ctx 42% | 0.50 USD', st.text(s))
+    assert(st.text(s) == 'codex | gpt-5 (high) | running | ctx 42% | 0.50 USD', st.text(s))
     assert(st.statusline(s):find('ctx 42%%', 1, true), st.statusline(s))
     local bar = st.winbar(s)
-    assert(
-        vim.startswith(bar, '%#BoomerWinbar#%#BoomerWinbarTitle#boomer%#BoomerWinbar# | codex | '),
-        bar
-    )
+    local rendered = api.nvim_eval_statusline(bar, { use_winbar = true, maxwidth = 100 }).str
+    assert(rendered == string.rep(' ', 100 - #st.text(s)) .. st.text(s), rendered)
     assert(bar:find('%#BoomerWinbarBusy#running', 1, true), bar)
     assert(
         st.text({ agent = 'x', state = 'failed', context = { used = 1500 } })
-            == 'boomer | x | failed | ctx 1.5k'
+            == 'x | failed | ctx 1.5k'
     )
     assert(require('boomer.util').tokens(1234567) == '1.2M')
 
     -- An effort without a model, a mode, and a '%' in a value (escaped).
     assert(
         st.text({ agent = 'x', effort = 'low', mode = 'plan', state = 'ready' })
-            == 'boomer | x | low | plan | ready'
+            == 'x | low | plan | ready'
     )
     assert(st.winbar({ agent = '100%', state = 'ready' }):find('100%%', 1, true))
 
@@ -1362,14 +1360,14 @@ local function notify(method, params)
 end
 
 -- Evaluate the chat window's winbar as Neovim draws it.
-local function winbar(buf)
+local function winbar(buf, padded)
     local win = vim.fn.win_findbuf(buf)[1]
     vim.g.statusline_winid = win
     -- Wide enough not to truncate in the narrow test window.
     local opts = { winid = win, use_winbar = true, maxwidth = 200 }
     local s = api.nvim_eval_statusline(vim.wo[win].winbar, opts).str
     vim.g.statusline_winid = nil
-    return s
+    return padded and s or (s:gsub('^ +', ''))
 end
 
 test('codex slash commands', function()
@@ -1469,9 +1467,10 @@ test('codex slash commands', function()
     end, 'autocmds')
     assert(done[1] == 'completed')
     local bar = winbar(buf)
-    assert(bar == 'boomer | codex | m2 (high) | ready | ctx 42%', bar)
+    assert(bar == 'codex | m2 (high) | ready | ctx 42%', bar)
+    assert(winbar(buf, true) == string.rep(' ', 200 - #bar) .. bar, winbar(buf, true))
     assert(
-        boomer.statusline() == 'boomer | codex | m2 (high) | ready | ctx 42%%',
+        boomer.statusline() == 'codex | m2 (high) | ready | ctx 42%%',
         boomer.statusline()
     )
     assert(boomer.status().context.size == 100000)
@@ -1550,7 +1549,7 @@ test('codex permissions', function()
     assert(winbar(buf) == 'codex | Read Only', winbar(buf))
     -- statusline() always uses the default layout.
     local line = boomer.statusline()
-    assert(vim.startswith(line, 'boomer | codex | ') and line:find(' | ready', 1, true), line)
+    assert(vim.startswith(line, 'codex | ') and line:find(' | ready', 1, true), line)
     assert(boomer.status().permissions == 'Read Only')
     send(buf)
     turn(buf, 2)
@@ -1747,7 +1746,7 @@ test('acp slash commands and defaults', function()
     })
     ready(buf)
     assert(state(buf).model == 'Two', state(buf).model)
-    assert(winbar(buf) == 'boomer | copilot | Two (high) | Plan | ready', winbar(buf))
+    assert(winbar(buf) == 'copilot | Two (high) | Plan | ready', winbar(buf))
 
     -- Insert-mode completion of commands and their arguments.
     type_draft(buf, '/pl')
@@ -1825,7 +1824,7 @@ test('acp slash commands and defaults', function()
     local nbuf = api.nvim_win_get_buf(win)
     assert(nbuf ~= buf and not api.nvim_buf_is_valid(buf))
     ready(nbuf)
-    assert(state(nbuf).agent == 'codex' and winbar(nbuf):find('^boomer | codex'), winbar(nbuf))
+    assert(state(nbuf).agent == 'codex' and winbar(nbuf):find('^codex'), winbar(nbuf))
     finish()
 end)
 

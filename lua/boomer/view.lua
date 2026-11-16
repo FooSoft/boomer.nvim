@@ -35,7 +35,6 @@ local function highlights()
         BoomerError = 'DiagnosticError',
         BoomerQueued = 'Comment',
         BoomerWinbar = 'WinBar',
-        BoomerWinbarTitle = 'Function',
         BoomerWinbarBusy = 'DiagnosticWarn',
         BoomerWinbarError = 'DiagnosticError',
     }) do

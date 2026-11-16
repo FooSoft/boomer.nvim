@@ -321,10 +321,10 @@ A default the agent refuses is reported in the chat. Example: >lua
 ==============================================================================
 6. STATUS                                                      *boomer-status*
 
-The chat's 'winbar' shows "boomer" followed by the agent, model and effort,
-mode, state, queued prompts, context use and cost, for example: >
+The chat's 'winbar' shows the agent, model and effort, mode, state, queued
+prompts, context use and cost, aligned to the right, for example: >
 
-    boomer | copilot | Claude Sonnet 4.5 (high) | Plan | running | ctx 42%
+    copilot | Claude Sonnet 4.5 (high) | Plan | running | ctx 42%
 <
 It is set window-locally for the chat buffer only. Set `winbar = false` to
 disable it.
@@ -428,8 +428,6 @@ Groups are defined with `default = true`; override them with
   BoomerQueued          `Queued:` lines of queued prompts. Links to
                         `Comment`.
   BoomerWinbar          Winbar text. Links to |hl-WinBar|.
-  BoomerWinbarTitle     "boomer" at the start of the winbar. Links to
-                        `Function`.
   BoomerWinbarBusy      Busy states in the winbar. Links to
                         `DiagnosticWarn`.
   BoomerWinbarError     `failed` and `closed` in the winbar. Links to
