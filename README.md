@@ -24,7 +24,7 @@ Commands work as `:Boomer {command}` (with completion) or typed in the prompt as
 | `/model [id]`, `/effort [level]` | Pick or set the model / reasoning effort |
 | `/mode [mode]` | Pick or set the mode, e.g. `/mode plan` (Codex), `/mode agent` (leaves Copilot's plan mode) |
 | `/settings` | Pick any session setting the agent offers |
-| `/permissions [preset]` | Read Only / Default / Full Access (Codex) |
+| `/permissions [preset]` | Read Only / Default / Full Access (Codex); default / assisted / allow-all (Copilot) |
 | `/resume [id]`, `/new` | Load a saved session / start a new one |
 | `/agent [name]` | Switch to another agent profile |
 | `/compact [focus]` | Compact the conversation |

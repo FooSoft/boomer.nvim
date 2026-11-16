@@ -9,6 +9,8 @@ local M = {}
 -- `gate` names the precondition checked before the command runs (see
 -- blocked() in init.lua); `complete` the kind of argument it completes.
 -- `ex` commands are only available as `:Boomer {name}`, not from the prompt.
+-- `defer` commands run the agent's command of the same name if it has one,
+-- and then show and complete its hint.
 M.builtins = {
     model = { desc = 'Choose the model', hint = '[model]', gate = 'idle', complete = 'model' },
     effort = {
@@ -32,11 +34,13 @@ M.builtins = {
         hint = '[preset]',
         gate = 'idle',
         complete = 'permissions',
+        defer = true,
     },
     compact = {
         desc = 'Summarize the conversation to free context',
         hint = '[focus]',
         gate = 'idle',
+        defer = true,
     },
     agent = {
         desc = 'Switch to another agent',
@@ -60,6 +64,25 @@ function M.parse(text)
     if name and (args == '' or args:match('^%s')) then
         return { name = name, args = vim.trim(args) }
     end
+end
+
+-- The literal choices in an agent's argument hint, such as Copilot's
+-- `[default|assisted|allow-all|show]`; placeholders like `<objective>` are
+-- skipped.
+---@param hint? string
+---@return string[]
+function M.hint_values(hint)
+    local out = {}
+    local group = type(hint) == 'string' and hint:match('^%s*%[([^%]]*)%]')
+    if group and group:find('|', 1, true) then
+        for value in vim.gsplit(group, '|', { plain = true }) do
+            value = vim.trim(value)
+            if value:match('^[%w][%w._-]*$') then
+                out[#out + 1] = value
+            end
+        end
+    end
+    return out
 end
 
 -- Expand a user `prompt`: a string with $ARGUMENTS or a function(args, ctx).
@@ -104,7 +127,8 @@ function M.list(user, agent, typed)
     for _, name in ipairs(sorted(M.builtins)) do
         local b = M.builtins[name]
         if user[name] == nil and not (typed and b.ex) then
-            add(name, b.desc, b.hint, 'builtin', b)
+            local hint = b.defer and agent[name] and agent[name].hint or b.hint
+            add(name, b.desc, hint, 'builtin', b)
         end
     end
     for _, name in ipairs(sorted(agent)) do

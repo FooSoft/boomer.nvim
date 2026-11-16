@@ -701,6 +701,7 @@ local session_fields = {
 -- Open a session (a new one when id is nil) in the chat's current view.
 local function load(c, id)
     c.loading, c.session, c.agent_commands = true, nil, {}
+    c.fetched = nil
     -- Pickers for the previous session are now stale.
     c.picks = (c.picks or 0) + 1
     update(c, session_fields)
@@ -996,16 +997,33 @@ function M.mode(value)
     return set_category('mode', 'mode', value)
 end
 
--- Prefer the agent's own command (ACP agents may advertise one).
+-- Prefer the agent's own command (ACP agents may advertise one). Without a
+-- value, pick one of the choices in its hint (Copilot: `allow-all`, ...).
 ---@param value? string
 function M.permissions(value)
     local c = chat
-    if c and c.agent_commands.permissions then
+    local agent_cmd = c and c.agent_commands.permissions
+    if agent_cmd then
         if not check(c, 'idle') then
             return
         end
-        local line = '/permissions' .. (value and (' ' .. value) or '')
-        send(c, line, not typed and line or nil)
+        local values = not value and commands.hint_values(agent_cmd.hint) or {}
+        if #values == 0 then
+            local line = '/permissions' .. (value and (' ' .. value) or '')
+            send(c, line, not typed and line or nil)
+            return true
+        end
+        pick(c, values, {
+            prompt = 'Boomer permissions:',
+            format_item = tostring,
+        }, function(choice, err)
+            if err then
+                report(c, err)
+            elseif choice and check(c, 'idle') then
+                local line = '/permissions ' .. choice
+                send(c, line, line)
+            end
+        end)
         return true
     end
     return set_category('permissions', 'permissions', value)
@@ -1236,15 +1254,55 @@ local function command_items(c, base)
     return items
 end
 
--- Values for a command's argument. Completion must not block on the agent,
--- so settings come from what the client already knows.
-local function arg_candidates(name)
+-- Fetch, once, what argument completion lacks: the settings (Codex lists its
+-- models on demand) or the saved sessions. again() runs if values arrived.
+local function fetch(c, what, again)
+    c.fetched = c.fetched or {}
+    if c.fetched[what] or not c.session or c.dead or c.closed then
+        return
+    end
+    c.fetched[what] = true
+    local function done(found)
+        if found then
+            vim.schedule(function()
+                if chat == c and not c.dead and not c.closed then
+                    again()
+                end
+            end)
+        end
+    end
+    if what == 'session' then
+        c.client:list_sessions(c.opts.cwd, function(err, items)
+            if not err then
+                c.sessions = items
+            end
+            done(not err and #items > 0)
+        end)
+    else
+        c.client:settings(function(err, list)
+            local s = not err and util.find(list, util.categories[what])
+            done(s and #s.choices > 0)
+        end)
+    end
+end
+
+-- Values for a command's argument. Completion must not block on the agent:
+-- what the client does not know yet is fetched in the background, and
+-- again() runs when it arrived.
+local function arg_candidates(name, again)
     local c = chat
     local item = commands.find(config.options.commands, c and c.agent_commands or {}, name, false)
     if not item then
         return {}
     end
     local spec, kind = item.spec, item.source == 'builtin' and item.spec.complete
+    local agent_cmd = c and c.agent_commands[name]
+    if agent_cmd and (item.source == 'agent' or spec.defer) then
+        local values = commands.hint_values(agent_cmd.hint)
+        if #values > 0 or item.source == 'agent' then
+            return values
+        end
+    end
     if item.source == 'user' and spec.complete then
         if type(spec.complete) == 'function' then
             local ok, list = pcall(spec.complete, c and M.status())
@@ -1254,16 +1312,29 @@ local function arg_candidates(name)
     elseif kind == 'agent' then
         return config.installed_agent_names(c and c.opts.name)
     elseif kind == 'session' then
+        if c and not c.sessions then
+            fetch(c, 'session', again)
+        end
         return vim.tbl_map(function(s)
             return s.id
         end, c and c.sessions or {})
     elseif kind and util.categories[kind] and c and c.client and not c.dead then
         local s = util.find(c.client:setting_list(), util.categories[kind])
+        if not s or #s.choices == 0 then
+            fetch(c, kind, again)
+        end
         -- Copilot's mode IDs are URIs; their names are what anyone types.
-        return vim.tbl_map(function(choice)
+        -- It also lists some models twice.
+        local out, seen = {}, {}
+        for _, choice in ipairs(s and s.choices or {}) do
             local value = tostring(choice.value)
-            return value:find('://', 1, true) and choice.label:lower() or value
-        end, s and s.choices or {})
+            value = value:find('://', 1, true) and choice.label:lower() or value
+            if not seen[value] then
+                seen[value] = true
+                out[#out + 1] = value
+            end
+        end
+        return out
     end
     return {}
 end
@@ -1288,7 +1359,15 @@ function M.complete(lead, cmdline, pos)
         ))
         return prefixed(names, lead)
     end
-    return prefixed(arg_candidates(name), lead)
+    return prefixed(
+        arg_candidates(name, function()
+            -- Show the values that arrived, if still completing.
+            if vim.fn.getcmdtype() == ':' and vim.fn.exists('*wildtrigger') == 1 then
+                pcall(vim.fn.wildtrigger)
+            end
+        end),
+        lead
+    )
 end
 
 -- 'omnifunc' for the chat buffer: a command name at the start of the draft,
@@ -1319,9 +1398,27 @@ function M.omnifunc(findstart, base)
         return -3
     end
     if completing then
+        local name = completing
         return vim.tbl_map(function(s)
             return { word = s }
-        end, prefixed(arg_candidates(completing), base))
+        end, prefixed(
+            arg_candidates(name, function()
+                -- Show the values that arrived if the argument is still
+                -- being typed.
+                if
+                    vim.api.nvim_get_mode().mode:sub(1, 1) ~= 'i'
+                    or M.omnifunc(1, '') < 0
+                    or completing ~= name
+                then
+                    return
+                end
+                local start = M.omnifunc(1, '')
+                local col = vim.api.nvim_win_get_cursor(0)[2]
+                local typed = vim.api.nvim_get_current_line():sub(start + 1, col)
+                vim.fn.complete(start + 1, M.omnifunc(0, typed))
+            end),
+            base
+        ))
     end
     return command_items(c, base)
 end

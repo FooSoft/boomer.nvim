@@ -3,8 +3,9 @@
 --
 -- A prompt is one long-lived session/prompt request; session/update
 -- notifications stream text, tool calls and status meanwhile. Settings are the
--- agent's session config options (plus legacy session modes), changed on the
--- agent immediately. Implements the client interface described in boomer.init.
+-- agent's session config options (plus legacy session modes and models),
+-- changed on the agent immediately. Implements the client interface described
+-- in boomer.init.
 local Rpc = require('boomer.rpc')
 local util = require('boomer.util')
 local M = {}
@@ -16,6 +17,7 @@ local M = {}
 ---@field caps table agentCapabilities from initialize.
 ---@field options? table[] The session's configOptions, as last reported.
 ---@field modes? table Legacy session modes: { currentModeId, availableModes }.
+---@field models? table Legacy session models: { currentModelId, availableModels }.
 ---@field title? string
 ---@field loading? boolean A session/load is replaying history.
 ---@field early? table[] session/update params that arrived before session/new returned.
@@ -85,7 +87,8 @@ end
 -- Shared by session/new and session/load. A loaded session's history arrives
 -- as session/update notifications before session/load returns.
 function Acp:open(method, params, cb)
-    self.session, self.options, self.modes, self.title = params.sessionId, nil, nil, nil
+    self.session, self.options, self.modes, self.models = params.sessionId, nil, nil, nil
+    self.title = nil
     self.loading = method == 'session/load'
     self.early = not params.sessionId and {} or nil
     self.rpc:request(method, params, function(err, r)
@@ -100,6 +103,7 @@ function Acp:open(method, params, cb)
         end
         self.session, self.options = id, r.configOptions
         self.modes = type(r.modes) == 'table' and r.modes or nil
+        self.models = type(r.models) == 'table' and r.models or nil
         self:report()
         for _, p in ipairs(early) do
             if p.sessionId == id then
@@ -360,8 +364,36 @@ local function flatten(options, prefix, out)
     return out
 end
 
--- The session's settings. Legacy session modes appear as a `mode` setting
--- (ID '$mode') when no config option has that category.
+-- Legacy session modes and models (from the session/new result), as `$mode`
+-- and `$model` settings. `item` is the ID key of a list entry, `param` that
+-- of the request changing it.
+local legacy = {
+    {
+        id = '$mode',
+        label = 'Mode',
+        category = 'mode',
+        field = 'modes',
+        current = 'currentModeId',
+        list = 'availableModes',
+        item = 'id',
+        method = 'session/set_mode',
+        param = 'modeId',
+    },
+    {
+        id = '$model',
+        label = 'Model',
+        category = 'model',
+        field = 'models',
+        current = 'currentModelId',
+        list = 'availableModels',
+        item = 'modelId',
+        method = 'session/set_model',
+        param = 'modelId',
+    },
+}
+
+-- The session's settings. Legacy session modes and models appear when no
+-- config option has their category.
 ---@return boomer.Setting[]
 function Acp:setting_list()
     local list = {}
@@ -379,20 +411,25 @@ function Acp:setting_list()
             }
         end
     end
-    local modes = self.modes
-    if modes and not util.find(list, 'mode') and type(modes.availableModes) == 'table' then
-        local choices = {}
-        for _, m in ipairs(modes.availableModes) do
-            choices[#choices + 1] = { label = tostring(m.name or m.id), value = m.id }
-        end
-        if #choices > 0 then
-            list[#list + 1] = {
-                id = '$mode',
-                label = 'Mode',
-                category = 'mode',
-                current = modes.currentModeId,
-                choices = choices,
-            }
+    for _, l in ipairs(legacy) do
+        local state = self[l.field]
+        if state and not util.find(list, l.category) and type(state[l.list]) == 'table' then
+            local choices = {}
+            for _, m in ipairs(state[l.list]) do
+                if type(m) == 'table' and m[l.item] ~= nil then
+                    choices[#choices + 1] =
+                        { label = tostring(m.name or m[l.item]), value = m[l.item] }
+                end
+            end
+            if #choices > 0 then
+                list[#list + 1] = {
+                    id = l.id,
+                    label = l.label,
+                    category = l.category,
+                    current = state[l.current],
+                    choices = choices,
+                }
+            end
         end
     end
     return list
@@ -416,19 +453,22 @@ end
 
 -- Change a setting on the agent; cb(err) when it answered.
 function Acp:configure(id, value, cb)
-    if id == '$mode' then
-        self.rpc:request(
-            'session/set_mode',
-            { sessionId = self.session, modeId = value },
-            function(err)
-                if not err and self.modes then
-                    self.modes.currentModeId = value
-                    self:report()
+    for _, l in ipairs(legacy) do
+        if id == l.id then
+            self.rpc:request(
+                l.method,
+                { sessionId = self.session, [l.param] = value },
+                function(err)
+                    local state = self[l.field]
+                    if not err and state then
+                        state[l.current] = value
+                        self:report()
+                    end
+                    cb(err)
                 end
-                cb(err)
-            end
-        )
-        return
+            )
+            return
+        end
     end
     self.rpc:request(
         'session/set_config_option',

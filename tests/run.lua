@@ -1699,6 +1699,12 @@ test('acp slash commands and defaults', function()
             availableCommands = {
                 { name = 'plan', description = 'Plan it', input = { hint = 'goal' } },
                 { name = 'compact', description = 'Compact' },
+                {
+                    name = 'permissions',
+                    description = 'Switch permission modes',
+                    input = { hint = '[default|assisted|allow-all|show]' },
+                },
+                { name = 'autopilot', input = { hint = '[on|off|<objective>]' } },
             },
         }),
         respond({
@@ -1735,6 +1741,7 @@ test('acp slash commands and defaults', function()
         )
     )
     vim.list_extend(scenario.steps, prompt('/compact keep tests'))
+    vim.list_extend(scenario.steps, prompt('/permissions allow-all'))
     vim.list_extend(scenario.steps, {
         expect('session/set_mode', { sessionId = 's1', modeId = agent_mode }),
         respond(vim.empty_dict()),
@@ -1778,6 +1785,25 @@ test('acp slash commands and defaults', function()
     assert(has(buf, 'Cost: 0.25 USD'), text(buf))
     send(buf, '/compact keep tests')
     turn(buf, 2)
+    -- /permissions shows, completes and picks the agent's hint choices.
+    local values = vim.fn.getcompletion('Boomer permissions ', 'cmdline')
+    assert(
+        vim.deep_equal(values, { 'default', 'assisted', 'allow-all', 'show' }),
+        vim.inspect(values)
+    )
+    values = vim.fn.getcompletion('Boomer autopilot ', 'cmdline')
+    assert(vim.deep_equal(values, { 'on', 'off' }), vim.inspect(values))
+    type_draft(buf, '/permissions al')
+    api.nvim_set_current_win(vim.fn.win_findbuf(buf)[1])
+    keys('A<C-x><C-o><Esc>')
+    assert(draft(buf) == '/permissions allow-all', draft(buf))
+    type_draft(buf, '')
+    send(buf, '/help')
+    assert(has(buf, '/permissions [default|assisted|allow-all|show] - '), text(buf))
+    vim.ui.select = pick('allow-all')
+    send(buf, '/permissions')
+    turn(buf, 3)
+    assert(has(buf, 'Prompt: /permissions allow-all'), text(buf))
     send(buf, '/mode agent')
     await(function()
         return state(buf).mode == 'Agent'
@@ -2282,6 +2308,74 @@ test('acp protocol edges', function()
         return status(api.nvim_get_current_buf(), 'failed')
     end, 'load unsupported')
     assert(has(api.nvim_get_current_buf(), 'Error: this agent cannot load sessions'))
+    finish()
+end)
+
+test('completion fetches what it lacks', function()
+    -- Codex lists its models and sessions only on request: completion asks
+    -- once in the background and shows the values when they arrive.
+    local base = load('codex-basic')
+    local scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 5) }
+    vim.list_extend(scenario.steps, steps(load('codex-models'), 4, 5))
+    vim.list_extend(scenario.steps, steps(load('codex-sessions'), 4, 5))
+    local buf = open(scenario)
+    ready(buf)
+    type_draft(buf, '/model ')
+    api.nvim_set_current_win(vim.fn.win_findbuf(buf)[1])
+    -- "x!" keeps Insert mode while scheduled callbacks run; a timer alone
+    -- would let headless Neovim read EOF and quit.
+    local shown, deadline = nil, vim.uv.hrtime() + 2e9
+    local function poll()
+        local items = vim.fn.complete_info({ 'items' }).items
+        if #items > 0 or vim.uv.hrtime() > deadline then
+            shown = vim.tbl_map(function(i)
+                return i.word
+            end, items)
+            api.nvim_input('<C-e><Esc>')
+        else
+            vim.uv.sleep(5)
+            vim.schedule(poll)
+        end
+    end
+    vim.schedule(poll)
+    keys('A<C-x><C-o>', '!')
+    assert(vim.deep_equal(shown, { 'm1', 'm2' }), vim.inspect(shown))
+    assert(vim.deep_equal(vim.fn.getcompletion('Boomer effort ', 'cmdline'), { 'high' }))
+    type_draft(buf, '')
+    assert(vim.deep_equal(vim.fn.getcompletion('Boomer resume ', 'cmdline'), {}))
+    assert(vim.deep_equal(vim.fn.getcompletion('Boomer resume ', 'cmdline'), {}))
+    await(function()
+        return #vim.fn.getcompletion('Boomer resume ', 'cmdline') > 0
+    end, 'sessions')
+    finish()
+
+    -- ACP agents without config options may report legacy session models.
+    local acp = load('acp-basic')
+    scenario = { version = 1, profile = 'acp-v1', steps = steps(acp, 1, 3) }
+    vim.list_extend(scenario.steps, {
+        respond({
+            sessionId = 's1',
+            models = {
+                currentModelId = 'a',
+                availableModels = {
+                    { modelId = 'a', name = 'Alpha' },
+                    { modelId = 'b', name = 'Beta' },
+                    -- Copilot lists `auto` twice.
+                    { modelId = 'a', name = 'Alpha' },
+                },
+            },
+        }, 'new'),
+        expect('session/set_model', { sessionId = 's1', modelId = 'b' }),
+        respond(vim.empty_dict()),
+    })
+    buf = open(scenario, 'copilot')
+    ready(buf)
+    assert(state(buf).model == 'Alpha', state(buf).model)
+    assert(vim.deep_equal(vim.fn.getcompletion('Boomer model ', 'cmdline'), { 'a', 'b' }))
+    send(buf, '/model Beta')
+    await(function()
+        return state(buf).model == 'Beta'
+    end, 'legacy model')
     finish()
 end)
 
