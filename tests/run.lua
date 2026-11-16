@@ -248,9 +248,9 @@ end
 
 local function pick(label)
     return function(items, opts, cb)
-        for _, item in ipairs(items) do
+        for i, item in ipairs(items) do
             if opts.format_item(item):find(label, 1, true) then
-                return cb(item)
+                return cb(item, i)
             end
         end
         error('no choice ' .. label)
@@ -920,6 +920,7 @@ test('permissions', function()
         turn(buf)
         assert(count(buf, 'Agent:\nhello') == 1)
         assert(not has(buf, 'Allow for this session'), 'choices dumped into transcript')
+        assert(not text(buf):find('Error: Permission %d'), text(buf))
         finish()
         return buf
     end

@@ -266,7 +266,10 @@ local function select(items, opts, cb, wanted)
         if wanted and not wanted() then
             return answer()
         end
-        local ok, err = pcall(vim.ui.select, items, opts, answer)
+        -- on_choice gets (item, idx); idx must not be taken for an error.
+        local ok, err = pcall(vim.ui.select, items, opts, function(item)
+            answer(item)
+        end)
         if not ok then
             answer(nil, 'UI error: ' .. tostring(err))
         end
