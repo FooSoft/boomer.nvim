@@ -631,6 +631,15 @@ local function attach(c, view)
         vim.api.nvim_feedkeys(enter, 'in', false)
     end, { buffer = buf, desc = 'Submit Boomer prompt' })
     vim.keymap.set('n', '<C-c>', M.cancel, { buffer = buf, desc = 'Cancel Boomer turn' })
+    -- Copilot tells users to press <S-Tab> to leave plan mode. The completion
+    -- menu keeps it; the picker waits for the expr mapping's textlock to end.
+    vim.keymap.set({ 'i', 'n', 'x' }, '<S-Tab>', function()
+        if vim.fn.pumvisible() == 1 then
+            return '<C-p>'
+        end
+        vim.schedule(M.mode)
+        return ''
+    end, { buffer = buf, expr = true, desc = 'Pick Boomer mode' })
     -- Slash commands complete with <C-x><C-o>, and through 'complete' with
     -- <C-n> and 'autocomplete' (the omnifunc declines outside a command).
     vim.bo[buf].omnifunc = "v:lua.require'boomer'.omnifunc"
@@ -980,6 +989,13 @@ function M.effort(value)
     return set_category('effort', 'reasoning effort', value)
 end
 
+-- The only way out of an ACP agent's plan mode: Copilot does not let the
+-- model leave it.
+---@param value? string Mode ID or name; picks when nil.
+function M.mode(value)
+    return set_category('mode', 'mode', value)
+end
+
 -- Prefer the agent's own command (ACP agents may advertise one).
 ---@param value? string
 function M.permissions(value)
@@ -1243,8 +1259,10 @@ local function arg_candidates(name)
         end, c and c.sessions or {})
     elseif kind and util.categories[kind] and c and c.client and not c.dead then
         local s = util.find(c.client:setting_list(), util.categories[kind])
+        -- Copilot's mode IDs are URIs; their names are what anyone types.
         return vim.tbl_map(function(choice)
-            return tostring(choice.value)
+            local value = tostring(choice.value)
+            return value:find('://', 1, true) and choice.label:lower() or value
         end, s and s.choices or {})
     end
     return {}

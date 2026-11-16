@@ -1,8 +1,9 @@
 -- Codex App Server adapter (`codex app-server --listen stdio://`).
 --
 -- A chat session is a Codex thread; each prompt is a turn that ends with
--- turn/completed. Model, effort and permission preset are staged locally and
--- sent with the next turn/start, which is how the Codex TUI does it.
+-- turn/completed. Model, effort, collaboration mode and permission preset are
+-- staged locally and sent with the next turn/start, which is how the Codex TUI
+-- does it. Collaboration modes (plan mode) need the experimental API.
 -- Implements the client interface described in boomer.init.
 local Rpc = require('boomer.rpc')
 local util = require('boomer.util')
@@ -15,9 +16,11 @@ local M = {}
 ---@field models? table[] model/list data, fetched on first use.
 ---@field model? string Staged by the user for the next turn.
 ---@field effort? string Staged by the user for the next turn.
+---@field mode? string Staged collaboration mode ('default' or 'plan').
 ---@field permissions? string Staged permission preset value.
 ---@field current_model? string What the thread uses, as reported by the server.
 ---@field current_effort? string
+---@field current_mode? string
 ---@field current_permissions? string Preset matching the thread's policies, or 'custom'.
 ---@field title? string
 ---@field turn? { cb: fun(err: table?, status: string?), id: string?, cancel: function?, interrupting: boolean? }
@@ -58,7 +61,7 @@ function M.start(profile, on, cb)
     self.rpc = rpc
     rpc:request('initialize', {
         clientInfo = { name = 'boomer', version = '0.1.0' },
-        capabilities = { experimentalApi = false },
+        capabilities = { experimentalApi = true },
     }, function(e)
         if not e then
             rpc:notify('initialized')
@@ -112,6 +115,13 @@ local presets = {
     },
 }
 
+-- Collaboration modes: the protocol's ModeKind values. collaborationMode/list
+-- also suggests an effort per mode; the user's effort is kept instead.
+local modes = {
+    { value = 'default', label = 'Default' },
+    { value = 'plan', label = 'Plan' },
+}
+
 local function find_preset(value)
     for _, p in ipairs(presets) do
         if p.value == value then
@@ -142,12 +152,18 @@ function Codex:report()
     end
     local perm = self.permissions or self.current_permissions
     local preset = find_preset(perm)
+    local mode = util.choice({ choices = modes }, self.mode or self.current_mode or '')
     self.on.status({
         model = opt(self.model or self.current_model),
         effort = opt(self.effort or self.current_effort),
+        mode = opt(mode and mode.label),
         title = opt(self.title),
         permissions = opt(preset and preset.label or perm and 'Custom'),
     })
+end
+
+local function mode_kind(collab)
+    return type(collab) == 'table' and type(collab.mode) == 'string' and collab.mode or nil
 end
 
 -- Shared by thread/start and thread/resume. A resumed thread's history comes
@@ -155,7 +171,7 @@ end
 -- partial), from thread/turns/list pages (capped at 100).
 function Codex:open(method, params, cb)
     self.session, self.model, self.effort, self.title = params.threadId, nil, nil, nil
-    self.permissions, self.current_permissions = nil, nil
+    self.mode, self.permissions, self.current_permissions = nil, nil, nil
     self.rpc:request(method, params, function(err, r)
         local thread = r and r.thread or {}
         if err or type(thread.id) ~= 'string' then
@@ -165,6 +181,7 @@ function Codex:open(method, params, cb)
         end
         self.session = thread.id
         self.current_model, self.current_effort = r.model, r.reasoningEffort
+        self.current_mode = mode_kind(r.collaborationMode)
         self.current_permissions = current_preset(r.approvalPolicy, r.sandbox)
         self.title = type(thread.name) == 'string' and thread.name ~= '' and thread.name or nil
         self:report()
@@ -227,14 +244,19 @@ local function effort_choices(models, model)
 end
 
 -- Profile defaults are matched by ID or name against model/list, fetched only
--- when a default is set. The model goes to thread/start, the effort is staged
--- for the first turn; a value that is not offered is reported and skipped.
+-- when a model or effort default is set. The model goes to thread/start, the
+-- effort and mode are staged for the first turn; a value that is not offered
+-- is reported and skipped.
 function Codex:new_session(cwd, cb)
     local p = self.profile
+    local mode = p.mode and util.choice({ choices = modes }, p.mode)
+    if p.mode and not mode then
+        self.on.error(('default mode: %s is not offered by this agent'):format(p.mode))
+    end
     local function start(model, effort)
         self:open('thread/start', { cwd = cwd, model = model }, function(err)
-            if not err and effort then
-                self.effort = effort
+            if not err and (effort or mode) then
+                self.effort, self.mode = effort, mode and mode.value
                 self:report()
             end
             cb(err)
@@ -301,6 +323,20 @@ end
 -- applies to this turn and later ones.
 function Codex:prompt(text, cb)
     local preset = find_preset(self.permissions)
+    -- The mode's settings override the turn's model and effort, so they carry
+    -- the same ones; Codex requires the model.
+    local model = self.model or self.current_model
+    local collab = self.mode
+        and model
+        and {
+            mode = self.mode,
+            settings = {
+                model = model,
+                reasoning_effort = self.effort or self.current_effort or vim.NIL,
+                -- null: the mode's built-in instructions.
+                developer_instructions = vim.NIL,
+            },
+        }
     local turn = { cb = cb }
     self.turn = turn
     self.rpc:request('turn/start', {
@@ -308,6 +344,7 @@ function Codex:prompt(text, cb)
         input = { { type = 'text', text = text, text_elements = {} } },
         model = self.model,
         effort = self.effort,
+        collaborationMode = collab or nil,
         approvalPolicy = preset and preset.approval,
         sandboxPolicy = preset and preset.sandbox,
     }, function(err, r)
@@ -446,6 +483,7 @@ function Codex:notification(method, p)
     elseif method == 'thread/settings/updated' then
         local s = type(p.threadSettings) == 'table' and p.threadSettings or {}
         self.current_model, self.current_effort = s.model, s.effort
+        self.current_mode = mode_kind(s.collaborationMode)
         self:report()
     elseif method == 'thread/name/updated' then
         self.title = p.threadName
@@ -574,8 +612,8 @@ function Codex:settings(cb)
     end)
 end
 
--- Model, effort and permissions, from what is known locally: before the
--- model list is fetched, only the permission presets have choices.
+-- Model, effort, mode and permissions, from what is known locally: before
+-- the model list is fetched, only modes and permission presets have choices.
 ---@return boomer.Setting[]
 function Codex:setting_list()
     local model = self.model or self.current_model
@@ -593,6 +631,13 @@ function Codex:setting_list()
             category = 'thought_level',
             current = self.effort or self.current_effort,
             choices = effort_choices(self.models, model),
+        },
+        {
+            id = 'mode',
+            label = 'Mode',
+            category = 'mode',
+            current = self.mode or self.current_mode,
+            choices = vim.deepcopy(modes),
         },
         {
             id = 'permissions',
@@ -613,6 +658,8 @@ function Codex:configure(id, value, cb)
         self.model, self.effort = value, nil
     elseif id == 'permissions' then
         self.permissions = value
+    elseif id == 'mode' then
+        self.mode = value
     else
         self.effort = value
     end

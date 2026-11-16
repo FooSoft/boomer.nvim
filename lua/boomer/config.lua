@@ -14,7 +14,7 @@
 ---@field label string Label of the agent's messages (set by resolve()).
 ---@field model? string Default model for new sessions (ID or name).
 ---@field effort? string Default reasoning effort for new sessions.
----@field mode? string Default mode for new sessions (ACP).
+---@field mode? string Default mode for new sessions.
 ---@field options table<string, any> ACP config option defaults for new sessions.
 
 local M = {}

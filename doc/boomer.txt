@@ -113,6 +113,14 @@ Commands that take an argument open a |vim.ui.select()| picker without one.
 /effort [{level}]                                       *boomer-/effort*
         Set the reasoning effort.
 
+/mode [{mode}]                                          *boomer-/mode*
+        Set the session mode, for agents that offer modes. {mode} matches a
+        mode ID or its name, such as `agent` or `plan`. Copilot's `/plan`
+        enters plan mode, and only `/mode agent` leaves it: the agent cannot
+        leave it by itself. Codex offers `default` and `plan` (its
+        experimental collaboration modes); like the model, the mode applies
+        from the next turn. In plan mode Codex asks its questions as text.
+
 /settings                                               *boomer-/settings*
         Pick any setting the agent offers for this session.
 
@@ -289,7 +297,7 @@ same name (`args` is replaced, not appended). Profile fields:
   env           Environment variables added to Neovim's environment.
   model         Model for new sessions (ID or name).
   effort        Reasoning effort for new sessions.
-  mode          Mode for new sessions (ACP), such as `plan`.
+  mode          Mode for new sessions, such as `plan`.
   options       Table of ACP session config option IDs to values, applied
                 to new sessions.
   label         Label of the agent's messages, such as `'Copilot:'`;
@@ -395,6 +403,9 @@ Boomer defines no global mappings. In the chat buffer:
                 a turn (|boomer-queue|).
   CTRL-C        (Insert, Normal) Cancel the active turn; queued prompts
                 return to the draft.
+  <S-Tab>       (Insert, Normal, Visual) Pick the session mode, like
+                |boomer-/mode|. With the completion menu open, it selects
+                the previous item instead.
 
 Map |:Boomer| commands with |<Cmd>|: >lua
 
@@ -433,7 +444,8 @@ the command started, or nil after a warning.
   setup({opts})         See |boomer.setup()|.
   open()                Open or focus the chat; returns its buffer.
   run({line})           Run a |:Boomer| command line, such as `'model gpt-5'`.
-  model([{value}]), effort([{value}]), permissions([{preset}]),
+  model([{value}]), effort([{value}]), mode([{value}]),
+  permissions([{preset}]),
   settings(), resume([{id}]), new(), agent([{name}]),
   compact([{focus}]), usage(), help(), cancel(), close()
                         See |boomer-commands|.

@@ -22,6 +22,7 @@ Commands work as `:Boomer {command}` (with completion) or typed in the prompt as
 | --- | --- |
 | `:Boomer` | Open or focus the chat |
 | `/model [id]`, `/effort [level]` | Pick or set the model / reasoning effort |
+| `/mode [mode]` | Pick or set the mode, e.g. `/mode plan` (Codex), `/mode agent` (leaves Copilot's plan mode) |
 | `/settings` | Pick any session setting the agent offers |
 | `/permissions [preset]` | Read Only / Default / Full Access (Codex) |
 | `/resume [id]`, `/new` | Load a saved session / start a new one |
@@ -37,7 +38,8 @@ the agent; unknown ones are not sent.
 The chat window's winbar shows the agent, model, mode, state and context use, e.g.
 `boomer | copilot | Claude Sonnet 4.5 (high) | Plan | ready | ctx 42%`. For statusline
 plugins use `require('boomer').statusline()` or `.status()`; `User BoomerStatus`
-and `User BoomerTurnDone` autocommands report changes. No global keymaps are set;
+and `User BoomerTurnDone` autocommands report changes. In the chat, `<S-Tab>` picks the mode
+(e.g. to leave Copilot's plan mode). No global keymaps are set;
 map commands directly, e.g. `vim.keymap.set('n', '<Leader>a', '<Cmd>Boomer<CR>')`.
 Run `:checkhealth boomer` to check agents.
 

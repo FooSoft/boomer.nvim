@@ -1503,7 +1503,7 @@ test('codex slash commands', function()
     end, 'ex model')
     vim.cmd('Boomer model m2')
     assert(vim.tbl_contains(vim.fn.getcompletion('Boomer ', 'cmdline'), 'cancel'))
-    assert(vim.deep_equal(vim.fn.getcompletion('Boomer mo', 'cmdline'), { 'model' }))
+    assert(vim.deep_equal(vim.fn.getcompletion('Boomer mod', 'cmdline'), { 'mode', 'model' }))
     assert(vim.deep_equal(vim.fn.getcompletion('Boomer model ', 'cmdline'), { 'm1', 'm2' }))
     assert(
         vim.deep_equal(vim.fn.getcompletion('Boomer agent c', 'cmdline'), { 'codex', 'copilot' })
@@ -1565,6 +1565,61 @@ test('codex permissions', function()
     finish()
 end)
 
+test('codex modes', function()
+    local base = load('codex-basic')
+    local function codex_turn(mode, effort)
+        local s = steps(base, 6, 9)
+        s[1].message.params.collaborationMode = {
+            mode = mode,
+            settings = {
+                model = 'm1',
+                reasoning_effort = effort or vim.NIL,
+                developer_instructions = vim.NIL,
+            },
+        }
+        return s
+    end
+    local scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 5) }
+    vim.list_extend(scenario.steps, steps(load('codex-models'), 4, 5))
+    vim.list_extend(scenario.steps, codex_turn('plan'))
+    vim.list_extend(scenario.steps, {
+        notify('thread/settings/updated', {
+            threadId = 's1',
+            threadSettings = {
+                model = 'm1',
+                effort = 'low',
+                collaborationMode = { mode = 'plan' },
+            },
+        }),
+    })
+    vim.list_extend(scenario.steps, codex_turn('default', 'low'))
+    local buf = open(scenario)
+    ready(buf)
+    assert(state(buf).mode == nil, vim.inspect(state(buf).mode))
+    assert(vim.deep_equal(vim.fn.getcompletion('Boomer mode ', 'cmdline'), { 'default', 'plan' }))
+
+    send(buf, '/mode plan')
+    await(function()
+        return state(buf).mode == 'Plan'
+    end, 'plan')
+    send(buf)
+    turn(buf)
+    await(function()
+        return state(buf).effort == 'low'
+    end, 'settings update')
+    assert(state(buf).mode == 'Plan')
+
+    vim.ui.select = pick('Default')
+    api.nvim_set_current_win(vim.fn.win_findbuf(buf)[1])
+    keys('<S-Tab>')
+    await(function()
+        return state(buf).mode == 'Default'
+    end, 'default')
+    send(buf)
+    turn(buf, 2)
+    finish()
+end)
+
 test('codex defaults', function()
     local base, models = load('codex-basic'), load('codex-models')
     local scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 3) }
@@ -1586,10 +1641,25 @@ test('codex defaults', function()
     assert(has(buf, 'Error: default model: nope is not offered by this agent'), text(buf))
     assert(has(buf, 'Error: default effort: max is not offered by this agent'), text(buf))
     finish()
+
+    scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 9) }
+    scenario.steps[6].message.params.collaborationMode = {
+        mode = 'plan',
+        settings = { model = 'm1', reasoning_effort = vim.NIL, developer_instructions = vim.NIL },
+    }
+    buf = open(scenario, nil, { agents = { codex = { mode = 'Plan' } } })
+    ready(buf)
+    assert(state(buf).mode == 'Plan')
+    send(buf)
+    turn(buf)
+    finish()
 end)
 
 test('acp slash commands and defaults', function()
     local base = load('acp-basic')
+    -- Copilot's mode IDs are URIs.
+    local agent_mode = 'https://agentclientprotocol.com/protocol/session-modes#agent'
+    local plan_mode = 'https://agentclientprotocol.com/protocol/session-modes#plan'
     local function options(model, effort)
         return {
             {
@@ -1636,14 +1706,14 @@ test('acp slash commands and defaults', function()
             sessionId = 's1',
             configOptions = options('m1', 'low'),
             modes = {
-                currentModeId = 'agent',
+                currentModeId = agent_mode,
                 availableModes = {
-                    { id = 'agent', name = 'Agent' },
-                    { id = 'plan', name = 'Plan' },
+                    { id = agent_mode, name = 'Agent' },
+                    { id = plan_mode, name = 'Plan' },
                 },
             },
         }, 'new'),
-        expect('session/set_mode', { sessionId = 's1', modeId = 'plan' }),
+        expect('session/set_mode', { sessionId = 's1', modeId = plan_mode }),
         respond(vim.empty_dict()),
         expect('session/set_config_option', { sessionId = 's1', configId = 'model', value = 'm2' }),
         respond({ configOptions = options('m2', 'low') }),
@@ -1666,6 +1736,12 @@ test('acp slash commands and defaults', function()
         )
     )
     vim.list_extend(scenario.steps, prompt('/compact keep tests'))
+    vim.list_extend(scenario.steps, {
+        expect('session/set_mode', { sessionId = 's1', modeId = agent_mode }),
+        respond(vim.empty_dict()),
+        expect('session/set_mode', { sessionId = 's1', modeId = plan_mode }),
+        respond(vim.empty_dict()),
+    })
     local buf = open(scenario, 'copilot', {
         agents = { copilot = { model = 'Two', effort = 'high', mode = 'plan' } },
     })
@@ -1681,6 +1757,9 @@ test('acp slash commands and defaults', function()
     type_draft(buf, '/model m')
     keys('A<C-x><C-o><Esc>')
     assert(draft(buf) == '/model m1', draft(buf))
+    type_draft(buf, '/mode p')
+    keys('A<C-x><C-o><Esc>')
+    assert(draft(buf) == '/mode plan', draft(buf))
     -- 'complete' includes the omnifunc, so <C-n> (and 'autocomplete') offer
     -- commands; elsewhere the omnifunc declines and buffer words complete.
     assert(vim.startswith(vim.bo[buf].complete, 'o,'), vim.bo[buf].complete)
@@ -1700,6 +1779,19 @@ test('acp slash commands and defaults', function()
     assert(has(buf, 'Cost: 0.25 USD'), text(buf))
     send(buf, '/compact keep tests')
     turn(buf, 2)
+    send(buf, '/mode agent')
+    await(function()
+        return state(buf).mode == 'Agent'
+    end, 'mode')
+    -- <S-Tab> picks the mode, as Copilot's plan mode advises.
+    vim.ui.select = function(items, _, cb)
+        cb(items[2], 2)
+    end
+    api.nvim_set_current_win(vim.fn.win_findbuf(buf)[1])
+    keys('<S-Tab>')
+    await(function()
+        return state(buf).mode == 'Plan'
+    end, '<S-Tab> mode')
 
     -- A picker opened from the prompt keeps Insert mode, like fzf-lua's
     -- terminal expects. With "x!" feedkeys returns once Insert mode ends.

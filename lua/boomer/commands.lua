@@ -17,6 +17,12 @@ M.builtins = {
         gate = 'idle',
         complete = 'effort',
     },
+    mode = {
+        desc = 'Choose the session mode (such as Agent or Plan)',
+        hint = '[mode]',
+        gate = 'idle',
+        complete = 'mode',
+    },
     resume = { desc = 'Load a saved session', hint = '[id]', gate = 'switch', complete = 'session' },
     new = { desc = 'Start a new session', gate = 'switch' },
     usage = { desc = 'Show context, token and cost usage', gate = 'session' },
