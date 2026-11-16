@@ -28,15 +28,16 @@ Commands work as `:Boomer {command}` (with completion) or typed in the prompt as
 | `/resume [id]`, `/new` | Load a saved session / start a new one |
 | `/agent [name]` | Switch to another agent profile |
 | `/compact [focus]` | Compact the conversation |
-| `/usage` | Context, token and cost usage |
+| `/usage` | Context, token and cost usage; Codex 5h and weekly limits |
 | `/help` | List commands, including user and agent commands |
 | `:Boomer cancel`, `:Boomer close` | Cancel the turn / stop the agent |
 
 Slash commands advertised by ACP agents (such as Copilot's `/plan`) are sent to
 the agent; unknown ones are not sent.
 
-The chat window's winbar shows the agent, model, mode, state and context use, aligned
-to the right, e.g. `copilot | Claude Sonnet 4.5 (high) | Plan | ready | ctx 42%`. For statusline
+The chat window's winbar shows the agent, model, mode, state, context use and (for
+Codex) 5h/weekly rate limits, aligned to the right, e.g.
+`codex | gpt-5 (high) | ready | ctx 42% | 5h 7% | wk 33%`. For statusline
 plugins use `require('boomer').statusline()` or `.status()`; `User BoomerStatus`
 and `User BoomerTurnDone` autocommands report changes. In the chat, `<S-Tab>` picks the mode
 (e.g. to leave Copilot's plan mode). No global keymaps are set;

@@ -23,6 +23,7 @@ local M = {}
 ---@field current_mode? string
 ---@field current_permissions? string Preset matching the thread's policies, or 'custom'.
 ---@field title? string
+---@field limits? boomer.Limits Account rate limits, merged from reads and updates.
 ---@field turn? { cb: fun(err: table?, status: string?), id: string?, cancel: function?, interrupting: boolean? }
 ---@field requests table<any, boomer.Permission> Open approval requests by RPC ID.
 local Codex = {}
@@ -443,8 +444,46 @@ local function tool_title(item)
     return type(value) == 'string' and value or item.type
 end
 
+-- Merge a rate-limit snapshot into the known windows and report them. Updates
+-- may be sparse and may describe other buckets (per-model limits), which are
+-- skipped: the `codex` bucket holds the 5-hour and weekly limits.
+function Codex:merge_limits(snap)
+    if type(snap) ~= 'table' or (snap.limitId and snap.limitId ~= 'codex') then
+        return
+    end
+    local limits = vim.deepcopy(self.limits or {})
+    for _, key in ipairs({ 'primary', 'secondary' }) do
+        local w = snap[key]
+        if type(w) == 'table' and type(w.usedPercent) == 'number' then
+            limits[key] = {
+                used = w.usedPercent,
+                window = w.windowDurationMins or (limits[key] or {}).window,
+                resets = w.resetsAt or (limits[key] or {}).resets,
+            }
+        end
+    end
+    if next(limits) then
+        self.limits = limits
+        self.on.status({ limits = vim.deepcopy(limits) })
+    end
+end
+
+-- Refresh the account's rate limits; cb() runs once they are known or the
+-- read failed (API-key logins have none), keeping what updates reported.
+function Codex:rate_limits(cb)
+    self.rpc:request('account/rateLimits/read', nil, function(err, r)
+        if not err and type(r) == 'table' then
+            self:merge_limits(r.rateLimits)
+        end
+        cb()
+    end, 10000)
+end
+
 function Codex:notification(method, p)
-    if method == 'serverRequest/resolved' then
+    if method == 'account/rateLimits/updated' then
+        self:merge_limits(p.rateLimits)
+        return
+    elseif method == 'serverRequest/resolved' then
         -- The server withdrew an approval request (the turn moved on).
         local req = self.requests[p.requestId]
         if req then

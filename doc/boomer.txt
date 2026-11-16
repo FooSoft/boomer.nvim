@@ -164,7 +164,8 @@ Commands that take an argument open a |vim.ui.select()| picker without one.
 
 /usage                                                  *boomer-/usage*
         Write context, token and cost usage into the chat. Works during a
-        turn.
+        turn. Codex also shows the 5-hour and weekly rate limits (percent
+        used and reset time), fetched fresh when signed in with ChatGPT.
 
 /help                                                   *boomer-/help*
         List the available commands, including user and agent commands.
@@ -329,9 +330,11 @@ A default the agent refuses is reported in the chat. Example: >lua
 6. STATUS                                                      *boomer-status*
 
 The chat's 'winbar' shows the agent, model and effort, mode, state, queued
-prompts, context use and cost, aligned to the right, for example: >
+prompts, context use, cost and Codex rate limits (5-hour and weekly, as
+percent used; highlighted from 90%), aligned to the right, for example: >
 
     copilot | Claude Sonnet 4.5 (high) | Plan | running | ctx 42%
+    codex | gpt-5 (high) | ready | ctx 42% | 5h 7% | wk 33%
 <
 It is set window-locally for the chat buffer only. Set `winbar = false` to
 disable it.
@@ -363,6 +366,9 @@ without a chat:
   tokens        `{ total = n, input = n, output = n }`: session totals
                 (Codex) or the last turn (ACP, if reported).
   cost          `{ amount = n, currency = s }` (ACP, if reported).
+  limits        `{ primary = l, secondary = l }` account rate limits (Codex,
+                ChatGPT login), each `{ used = percent, window = minutes,
+                resets = unix time }`: usually the 5-hour and weekly windows.
   cwd           Working directory.
   buf           Chat buffer.
 
@@ -437,8 +443,8 @@ Groups are defined with `default = true`; override them with
   BoomerWinbar          Winbar text. Links to |hl-WinBar|.
   BoomerWinbarBusy      Busy states in the winbar. Links to
                         `DiagnosticWarn`.
-  BoomerWinbarError     `failed` and `closed` in the winbar. Links to
-                        `DiagnosticError`.
+  BoomerWinbarError     `failed`, `closed` and rate limits from 90% in the
+                        winbar. Links to `DiagnosticError`.
 
 ==============================================================================
 10. LUA API                                                       *boomer-api*

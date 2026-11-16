@@ -39,6 +39,7 @@
 ---@field prompt fun(self, text: string, cb: fun(err: table?, status: string?))
 ---@field cancel fun(self, cb: fun(err: table)?)
 ---@field compact? fun(self, cb: fun(err: table?, status: string?)) Native compaction, if supported.
+---@field rate_limits? fun(self, cb: fun()) Refresh the `limits` status before /usage.
 ---@field setting_list fun(self): boomer.Setting[] What is known without asking the agent.
 ---@field settings fun(self, cb: fun(err: table?, list: boomer.Setting[]?)) May ask the agent.
 ---@field configure fun(self, id: string, value: any, cb: fun(err: table?))
@@ -1108,13 +1109,24 @@ function M.agent(name)
     return true
 end
 
--- Write context, token and cost usage into the chat.
+-- Write context, token, cost and rate-limit usage into the chat. Agents with
+-- rate limits are asked for fresh ones first.
 function M.usage()
     local c = chat
     if not check(c, 'session') then
         return
     end
-    c.view:write(table.concat(status_mod.usage(c.state), '\n'))
+    local view = c.view
+    local function write()
+        if not c.closed and c.view == view then
+            view:write(table.concat(status_mod.usage(c.state), '\n'))
+        end
+    end
+    if c.client.rate_limits then
+        c.client:rate_limits(write)
+    else
+        write()
+    end
     return true
 end
 

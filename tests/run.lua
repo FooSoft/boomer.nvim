@@ -393,6 +393,13 @@ test('status rendering', function()
         st.text({ agent = 'x', state = 'failed', context = { used = 1500 } })
             == 'x | failed | ctx 1.5k'
     )
+    -- Rate limits; a nearly used-up window is highlighted.
+    local limited = {
+        agent = 'codex',
+        limits = { primary = { used = 92.4, window = 300 }, secondary = { used = 10 } },
+    }
+    assert(st.text(limited) == 'codex | 5h 92% | wk 10%', st.text(limited))
+    assert(st.winbar(limited):find('%#BoomerWinbarError#5h 92%%', 1, true), st.winbar(limited))
     assert(require('boomer.util').tokens(1234567) == '1.2M')
 
     -- An effort without a model, a mode, and a '%' in a value (escaped).
@@ -1383,22 +1390,57 @@ test('codex slash commands', function()
     end
     local scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 5) }
     vim.list_extend(scenario.steps, steps(models, 4, 5))
+    local resets = os.time() + 3600
     vim.list_extend(
         scenario.steps,
-        codex_turn(
-            '/hello',
-            notify('thread/tokenUsage/updated', {
-                threadId = 's1',
-                turnId = 't1',
-                tokenUsage = {
-                    total = { totalTokens = 1500, inputTokens = 1000, outputTokens = 500 },
-                    last = { totalTokens = 42000 },
-                    modelContextWindow = 100000,
+        codex_turn('/hello', {
+            op = 'send_notification',
+            messages = {
+                {
+                    method = 'thread/tokenUsage/updated',
+                    params = {
+                        threadId = 's1',
+                        turnId = 't1',
+                        tokenUsage = {
+                            total = { totalTokens = 1500, inputTokens = 1000, outputTokens = 500 },
+                            last = { totalTokens = 42000 },
+                            modelContextWindow = 100000,
+                        },
+                    },
                 },
-            })
-        )
+                {
+                    method = 'account/rateLimits/updated',
+                    params = {
+                        rateLimits = {
+                            limitId = 'codex',
+                            primary = {
+                                usedPercent = 30,
+                                windowDurationMins = 300,
+                                resetsAt = resets,
+                            },
+                        },
+                    },
+                },
+                {
+                    method = 'account/rateLimits/updated',
+                    params = { rateLimits = { limitId = 'other', primary = { usedPercent = 99 } } },
+                },
+            },
+        })
     )
     vim.list_extend(scenario.steps, {
+        -- Sparse: the 5h window keeps its reset time from the update.
+        expect('account/rateLimits/read', vim.empty_dict()),
+        respond({
+            rateLimits = {
+                primary = { usedPercent = 40 },
+                secondary = {
+                    usedPercent = 12,
+                    windowDurationMins = 10080,
+                    resetsAt = resets + 2 * 86400,
+                },
+            },
+        }),
         expect('thread/compact/start', { threadId = 's1' }),
         respond(vim.empty_dict()),
         notify(
@@ -1467,10 +1509,10 @@ test('codex slash commands', function()
     end, 'autocmds')
     assert(done[1] == 'completed')
     local bar = winbar(buf)
-    assert(bar == 'codex | m2 (high) | ready | ctx 42%', bar)
+    assert(bar == 'codex | m2 (high) | ready | ctx 42% | 5h 30%', bar)
     assert(winbar(buf, true) == string.rep(' ', 200 - #bar) .. bar, winbar(buf, true))
     assert(
-        boomer.statusline() == 'codex | m2 (high) | ready | ctx 42%%',
+        boomer.statusline() == 'codex | m2 (high) | ready | ctx 42%% | 5h 30%%',
         boomer.statusline()
     )
     assert(boomer.status().context.size == 100000)
@@ -1481,6 +1523,10 @@ test('codex slash commands', function()
     end, 'usage')
     assert(has(buf, 'Context: 42.0k of 100.0k tokens (42%)'), text(buf))
     assert(has(buf, 'Tokens: 1.5k (1.0k in, 500 out)'), text(buf))
+    assert(has(buf, '5h limit: 40% used (resets ' .. os.date('%H:%M', resets) .. ')'), text(buf))
+    local weekly = os.date('%b %d %H:%M', resets + 2 * 86400)
+    assert(has(buf, 'Weekly limit: 12% used (resets ' .. weekly .. ')'), text(buf))
+    assert(winbar(buf):find('ctx 42% | 5h 40% | wk 12%', 1, true), winbar(buf))
 
     send(buf, '/compact')
     await(function()
@@ -2090,6 +2136,9 @@ test('codex protocol edges', function()
                 },
             },
         },
+        -- API-key logins have no rate limits.
+        expect('account/rateLimits/read', vim.empty_dict()),
+        reject('chatgpt authentication required'),
         -- Older servers propose amendments instead of listing decisions.
         turn_start('hello'),
         respond({ turn = { id = 't1', items = {}, status = 'inProgress' } }),
@@ -2155,8 +2204,12 @@ test('codex protocol edges', function()
     local st = state(buf)
     assert(st.model == 'm9' and st.effort == 'low', vim.inspect(st))
 
+    -- A failed rate-limit read still writes the usage.
+    assert(boomer.usage())
+    await(function()
+        return has(buf, 'No usage reported yet')
+    end, 'usage without rate limits')
     -- Commands that need no agent traffic.
-    assert(boomer.usage() and has(buf, 'No usage reported yet'), text(buf))
     assert(boomer.resume('s1'), 'resume the current session')
     assert(not boomer.compact('focus'))
     assert(notices[#notices] == 'This agent takes no compaction instructions', notices[#notices])

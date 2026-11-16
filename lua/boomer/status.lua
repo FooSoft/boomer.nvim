@@ -17,7 +17,17 @@
 ---@field context? { used: number?, size: number? } Tokens in the context window.
 ---@field tokens? { total: number?, input: number?, output: number? }
 ---@field cost? { amount: number?, currency: string? }
+---@field limits? boomer.Limits Account rate limits (Codex).
 ---@field buf? integer Chat buffer (in copies handed out by boomer.status()).
+
+---@class boomer.Limit
+---@field used number Percent of the window used.
+---@field window? number Window length in minutes.
+---@field resets? number Unix time the window resets.
+
+---@class boomer.Limits
+---@field primary? boomer.Limit Short window (5 hours).
+---@field secondary? boomer.Limit Long window (weekly).
 
 local util = require('boomer.util')
 local M = {}
@@ -39,8 +49,39 @@ local function cost(c)
     end
 end
 
+-- Rate-limit window name from its length, e.g. '5h' or 'Weekly'; Codex's
+-- primary and secondary windows are 5 hours and a week if it is unknown.
+local function window(l, key)
+    local mins = l.window
+    if type(mins) ~= 'number' then
+        return key == 'primary' and '5h' or 'Weekly'
+    end
+    return mins == 10080 and 'Weekly'
+        or mins % 1440 == 0 and (mins / 1440 .. 'd')
+        or mins % 60 == 0 and (mins / 60 .. 'h')
+        or (mins .. 'm')
+end
+
+local function used(l)
+    return math.floor(l.used + 0.5)
+end
+
+-- Winbar segment for a rate limit, e.g. "5h 42%" or "wk 10%".
+local function limit_part(limits, key)
+    local l = limits and limits[key]
+    if type(l) ~= 'table' or type(l.used) ~= 'number' then
+        return {}
+    end
+    local name = window(l, key)
+    return {
+        ('%s %d%%'):format(name == 'Weekly' and 'wk' or name, used(l)),
+        used(l) >= 90 and 'BoomerWinbarError' or nil,
+    }
+end
+
 -- { text, highlight group } segments: agent, model (effort), mode,
--- state, queued prompts, context and cost. Missing values are skipped.
+-- state, queued prompts, context, cost and rate limits. Missing values are
+-- skipped.
 ---@param st boomer.Status
 ---@return { [1]: string, [2]: string? }[]
 function M.parts(st)
@@ -58,6 +99,8 @@ function M.parts(st)
         { st.queued and (st.queued .. ' queued'), 'BoomerWinbarBusy' },
         { context(st.context) },
         { cost(st.cost) },
+        limit_part(st.limits, 'primary'),
+        limit_part(st.limits, 'secondary'),
     }) do
         if p[1] and p[1] ~= '' then
             parts[#parts + 1] = p
@@ -100,6 +143,17 @@ function M.statusline(st)
     return escape(M.text(st))
 end
 
+-- "5h limit: 42% used (resets 14:05)"; the date is added unless it resets
+-- within a day.
+local function limit_line(l, key)
+    local s = ('%s limit: %d%% used'):format(window(l, key), used(l))
+    if type(l.resets) == 'number' then
+        local soon = l.resets - os.time() < 86400
+        s = s .. ' (resets ' .. os.date(soon and '%H:%M' or '%b %d %H:%M', l.resets) .. ')'
+    end
+    return s
+end
+
 -- Lines written by /usage.
 ---@param st boomer.Status
 ---@return string[]
@@ -127,6 +181,12 @@ function M.usage(st)
     end
     if cost(st.cost) then
         lines[#lines + 1] = 'Cost: ' .. cost(st.cost)
+    end
+    for _, key in ipairs({ 'primary', 'secondary' }) do
+        local l = st.limits and st.limits[key]
+        if type(l) == 'table' and type(l.used) == 'number' then
+            lines[#lines + 1] = limit_line(l, key)
+        end
     end
     if #lines == 1 then
         lines[2] = 'No usage reported yet'
