@@ -1,0 +1,104 @@
+{
+    "version": 1,
+    "profile": "codex-v2",
+    "steps": [
+        {
+            "op": "expect_request",
+            "message": {
+                "id": {
+                    "capture": "init"
+                },
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {
+                        "name": "boomer",
+                        "version": "0.1.0"
+                    },
+                    "capabilities": {
+                        "experimentalApi": false
+                    }
+                }
+            }
+        },
+        {
+            "op": "send_response",
+            "message": {
+                "id": {
+                    "ref": "init"
+                },
+                "result": {
+                    "codexHome": "fixture",
+                    "platformFamily": "fixture",
+                    "platformOs": "fixture",
+                    "userAgent": "fixture"
+                }
+            },
+            "fragments": [
+                1,
+                3
+            ]
+        },
+        {
+            "op": "expect_notification",
+            "message": {
+                "method": "initialized",
+                "params": {}
+            }
+        },
+        {
+            "op": "expect_request",
+            "message": {
+                "id": {
+                    "capture": "models"
+                },
+                "method": "model/list",
+                "params": {
+                    "limit": 100
+                }
+            }
+        },
+        {
+            "op": "send_response",
+            "message": {
+                "id": {
+                    "ref": "models"
+                },
+                "result": {
+                    "data": [
+                        {
+                            "defaultReasoningEffort": "high",
+                            "description": "fixture",
+                            "displayName": "fixture",
+                            "hidden": false,
+                            "id": "m1",
+                            "isDefault": true,
+                            "model": "m1",
+                            "supportedReasoningEfforts": [
+                                {
+                                    "reasoningEffort": "high",
+                                    "description": "high"
+                                }
+                            ]
+                        },
+                        {
+                            "defaultReasoningEffort": "high",
+                            "description": "fixture",
+                            "displayName": "fixture",
+                            "hidden": false,
+                            "id": "m2",
+                            "isDefault": false,
+                            "model": "m2",
+                            "supportedReasoningEfforts": [
+                                {
+                                    "reasoningEffort": "high",
+                                    "description": "high"
+                                }
+                            ]
+                        }
+                    ],
+                    "nextCursor": null
+                }
+            }
+        }
+    ]
+}

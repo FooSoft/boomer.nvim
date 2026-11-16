@@ -1,0 +1,127 @@
+{
+    "version": 1,
+    "profile": "acp-v1",
+    "steps": [
+        {
+            "op": "expect_request",
+            "message": {
+                "id": {
+                    "capture": "init"
+                },
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": 1,
+                    "clientCapabilities": {},
+                    "clientInfo": {
+                        "name": "boomer",
+                        "version": "0.1.0"
+                    }
+                }
+            }
+        },
+        {
+            "op": "send_response",
+            "message": {
+                "id": {
+                    "ref": "init"
+                },
+                "result": {
+                    "protocolVersion": 1,
+                    "agentCapabilities": {},
+                    "authMethods": []
+                }
+            },
+            "fragments": [
+                1,
+                2,
+                7
+            ]
+        },
+        {
+            "op": "expect_request",
+            "message": {
+                "id": {
+                    "capture": "new"
+                },
+                "method": "session/new",
+                "params": {
+                    "cwd": "/tmp",
+                    "mcpServers": []
+                }
+            }
+        },
+        {
+            "op": "send_response",
+            "message": {
+                "id": {
+                    "ref": "new"
+                },
+                "result": {
+                    "sessionId": "s1",
+                    "configOptions": [
+                        {
+                            "id": "model",
+                            "category": "model",
+                            "name": "Model",
+                            "type": "select",
+                            "currentValue": "m1",
+                            "options": [
+                                {
+                                    "value": "m1",
+                                    "name": "One"
+                                },
+                                {
+                                    "value": "m2",
+                                    "name": "Two"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "op": "expect_request",
+            "message": {
+                "id": {
+                    "capture": "config"
+                },
+                "method": "session/set_config_option",
+                "params": {
+                    "sessionId": "s1",
+                    "configId": "model",
+                    "value": "m2"
+                }
+            }
+        },
+        {
+            "op": "send_response",
+            "message": {
+                "id": {
+                    "ref": "config"
+                },
+                "result": {
+                    "configOptions": [
+                        {
+                            "id": "model",
+                            "category": "model",
+                            "name": "Model",
+                            "type": "select",
+                            "currentValue": "m2",
+                            "options": [
+                                {
+                                    "value": "m1",
+                                    "name": "One"
+                                },
+                                {
+                                    "value": "m2",
+                                    "name": "Two"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+    ]
+}

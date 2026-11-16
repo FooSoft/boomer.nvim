@@ -1,0 +1,191 @@
+{
+    "version": 1,
+    "profile": "codex-v2",
+    "steps": [
+        {
+            "op": "expect_request",
+            "message": {
+                "id": {
+                    "capture": "init"
+                },
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {
+                        "name": "boomer",
+                        "version": "0.1.0"
+                    },
+                    "capabilities": {
+                        "experimentalApi": false
+                    }
+                }
+            }
+        },
+        {
+            "op": "send_response",
+            "message": {
+                "id": {
+                    "ref": "init"
+                },
+                "result": {
+                    "codexHome": "fixture",
+                    "platformFamily": "fixture",
+                    "platformOs": "fixture",
+                    "userAgent": "fixture"
+                }
+            },
+            "fragments": [
+                1,
+                3
+            ]
+        },
+        {
+            "op": "expect_notification",
+            "message": {
+                "method": "initialized",
+                "params": {}
+            }
+        },
+        {
+            "op": "expect_request",
+            "message": {
+                "id": {
+                    "capture": "new"
+                },
+                "method": "thread/start",
+                "params": {
+                    "cwd": "/tmp"
+                }
+            }
+        },
+        {
+            "op": "send_response",
+            "message": {
+                "id": {
+                    "ref": "new"
+                },
+                "result": {
+                    "approvalPolicy": "untrusted",
+                    "approvalsReviewer": "user",
+                    "cwd": "/tmp",
+                    "model": "m1",
+                    "modelProvider": "openai",
+                    "sandbox": {
+                        "type": "dangerFullAccess"
+                    },
+                    "thread": {
+                        "cliVersion": "0.167.1",
+                        "createdAt": 0,
+                        "cwd": "/tmp",
+                        "ephemeral": false,
+                        "id": "s1",
+                        "modelProvider": "openai",
+                        "preview": "fixture",
+                        "projectId": "fixture",
+                        "sessionId": "fixture",
+                        "source": "cli",
+                        "status": {
+                            "type": "notLoaded"
+                        },
+                        "turns": [],
+                        "updatedAt": 0
+                    }
+                }
+            }
+        },
+        {
+            "op": "expect_request",
+            "message": {
+                "id": {
+                    "capture": "prompt"
+                },
+                "method": "turn/start",
+                "params": {
+                    "threadId": "s1",
+                    "input": [
+                        {
+                            "type": "text",
+                            "text": "hello",
+                            "text_elements": []
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "op": "send_response",
+            "message": {
+                "id": {
+                    "ref": "prompt"
+                },
+                "result": {
+                    "turn": {
+                        "id": "t1",
+                        "items": [],
+                        "status": "inProgress",
+                        "error": null
+                    }
+                }
+            }
+        },
+        {
+            "op": "send_request",
+            "message": {
+                "id": "permission1",
+                "method": "item/fileChange/requestApproval",
+                "params": {
+                    "threadId": "s1",
+                    "turnId": "t1",
+                    "itemId": "tool1",
+                    "startedAtMs": 0
+                }
+            }
+        },
+        {
+            "op": "expect_response",
+            "message": {
+                "id": "permission1",
+                "result": {
+                    "decision": "accept"
+                }
+            }
+        },
+        {
+            "op": "send_notification",
+            "messages": [
+                {
+                    "method": "item/agentMessage/delta",
+                    "params": {
+                        "threadId": "s1",
+                        "turnId": "t1",
+                        "itemId": "i1",
+                        "delta": "hel"
+                    }
+                },
+                {
+                    "method": "item/agentMessage/delta",
+                    "params": {
+                        "threadId": "s1",
+                        "turnId": "t1",
+                        "itemId": "i1",
+                        "delta": "lo"
+                    }
+                }
+            ]
+        },
+        {
+            "op": "send_notification",
+            "message": {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "s1",
+                    "turn": {
+                        "id": "t1",
+                        "items": [],
+                        "status": "completed",
+                        "error": null
+                    }
+                }
+            }
+        }
+    ]
+}

@@ -1,0 +1,230 @@
+{
+    "version": 1,
+    "profile": "acp-v1",
+    "steps": [
+        {
+            "op": "expect_request",
+            "message": {
+                "id": {
+                    "capture": "init"
+                },
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": 1,
+                    "clientCapabilities": {},
+                    "clientInfo": {
+                        "name": "boomer",
+                        "version": "0.1.0"
+                    }
+                }
+            }
+        },
+        {
+            "op": "send_response",
+            "message": {
+                "id": {
+                    "ref": "init"
+                },
+                "result": {
+                    "protocolVersion": 1,
+                    "agentCapabilities": {
+                        "loadSession": true
+                    },
+                    "authMethods": []
+                }
+            },
+            "fragments": [
+                1,
+                2,
+                7
+            ]
+        },
+        {
+            "op": "expect_request",
+            "message": {
+                "id": {
+                    "capture": "new"
+                },
+                "method": "session/load",
+                "params": {
+                    "cwd": "/tmp",
+                    "mcpServers": [],
+                    "sessionId": "s1"
+                }
+            }
+        },
+        {
+            "op": "send_notification",
+            "messages": [
+                {
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "s1",
+                        "update": {
+                            "sessionUpdate": "user_message_chunk",
+                            "messageId": "u1",
+                            "content": {
+                                "type": "text",
+                                "text": "old "
+                            }
+                        }
+                    }
+                },
+                {
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "s1",
+                        "update": {
+                            "sessionUpdate": "user_message_chunk",
+                            "messageId": "u1",
+                            "content": {
+                                "type": "text",
+                                "text": "question"
+                            }
+                        }
+                    }
+                },
+                {
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "s1",
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "messageId": "a1",
+                            "content": {
+                                "type": "text",
+                                "text": "old answer"
+                            }
+                        }
+                    }
+                },
+                {
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "s1",
+                        "update": {
+                            "sessionUpdate": "user_message_chunk",
+                            "messageId": "u2",
+                            "content": {
+                                "type": "text",
+                                "text": "second question"
+                            }
+                        }
+                    }
+                },
+                {
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "s1",
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "messageId": "a2",
+                            "content": {
+                                "type": "text",
+                                "text": "second answer"
+                            }
+                        }
+                    }
+                },
+                {
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "s1",
+                        "update": {
+                            "sessionUpdate": "user_message_chunk",
+                            "messageId": "u3",
+                            "content": {
+                                "type": "image",
+                                "data": "aGVsbG8=",
+                                "mimeType": "image/png"
+                            }
+                        }
+                    }
+                },
+                {
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "s1",
+                        "update": {
+                            "sessionUpdate": "tool_call",
+                            "toolCallId": "history-tool",
+                            "title": "Read project",
+                            "status": "completed"
+                        }
+                    }
+                }
+            ]
+        },
+        {
+            "op": "send_response",
+            "message": {
+                "id": {
+                    "ref": "new"
+                },
+                "result": {
+                    "sessionId": "s1"
+                }
+            }
+        },
+        {
+            "op": "expect_request",
+            "message": {
+                "id": {
+                    "capture": "prompt"
+                },
+                "method": "session/prompt",
+                "params": {
+                    "sessionId": "s1",
+                    "prompt": [
+                        {
+                            "type": "text",
+                            "text": "hello"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "op": "send_notification",
+            "messages": [
+                {
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "s1",
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {
+                                "type": "text",
+                                "text": "hel"
+                            }
+                        }
+                    }
+                },
+                {
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "s1",
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {
+                                "type": "text",
+                                "text": "lo"
+                            }
+                        }
+                    }
+                }
+            ]
+        },
+        {
+            "op": "send_response",
+            "message": {
+                "id": {
+                    "ref": "prompt"
+                },
+                "result": {
+                    "stopReason": "end_turn"
+                }
+            }
+        }
+    ]
+}

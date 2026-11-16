@@ -1,0 +1,4 @@
+.deps/
+.artifacts/
+__pycache__/
+doc/tags

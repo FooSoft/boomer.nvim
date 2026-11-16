@@ -1,0 +1,83 @@
+{
+    "version": 1,
+    "profile": "acp-v1",
+    "steps": [
+        {
+            "op": "expect_request",
+            "message": {
+                "id": {
+                    "capture": "init"
+                },
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": 1,
+                    "clientCapabilities": {},
+                    "clientInfo": {
+                        "name": "boomer",
+                        "version": "0.1.0"
+                    }
+                }
+            }
+        },
+        {
+            "op": "send_response",
+            "message": {
+                "id": {
+                    "ref": "init"
+                },
+                "result": {
+                    "protocolVersion": 1,
+                    "agentCapabilities": {
+                        "loadSession": true,
+                        "sessionCapabilities": {
+                            "list": {}
+                        }
+                    },
+                    "authMethods": []
+                }
+            },
+            "fragments": [
+                1,
+                2,
+                7
+            ]
+        },
+        {
+            "op": "expect_request",
+            "message": {
+                "id": {
+                    "capture": "list1"
+                },
+                "method": "session/list",
+                "params": {
+                    "cwd": "/tmp"
+                }
+            }
+        },
+        {
+            "op": "send_response",
+            "message": {
+                "id": {
+                    "ref": "list1"
+                },
+                "result": {
+                    "sessions": [
+                        {
+                            "sessionId": "s2",
+                            "cwd": "/tmp",
+                            "title": "Saved chat 2",
+                            "updatedAt": "2026-11-15T12:00:02.123+02:00"
+                        },
+                        {
+                            "sessionId": "s1",
+                            "cwd": "/tmp",
+                            "title": "Saved chat 1",
+                            "updatedAt": "2026-11-15T10:00:01Z"
+                        }
+                    ],
+                    "nextCursor": null
+                }
+            }
+        }
+    ]
+}

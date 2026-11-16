@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stands in for `codex` or `copilot`: ignores the backend's arguments and plays
+# the scenario named by $BOOMER_SCENARIO.
+exec "${BOOMER_NVIM:-nvim}" --clean --headless -l "$(dirname "$0")/fake.lua" "$BOOMER_SCENARIO"

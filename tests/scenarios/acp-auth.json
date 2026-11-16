@@ -1,0 +1,66 @@
+{
+    "version": 1,
+    "profile": "acp-v1",
+    "steps": [
+        {
+            "op": "expect_request",
+            "message": {
+                "id": {
+                    "capture": "init"
+                },
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": 1,
+                    "clientCapabilities": {},
+                    "clientInfo": {
+                        "name": "boomer",
+                        "version": "0.1.0"
+                    }
+                }
+            }
+        },
+        {
+            "op": "send_response",
+            "message": {
+                "id": {
+                    "ref": "init"
+                },
+                "result": {
+                    "protocolVersion": 1,
+                    "agentCapabilities": {},
+                    "authMethods": []
+                }
+            },
+            "fragments": [
+                1,
+                2,
+                7
+            ]
+        },
+        {
+            "op": "expect_request",
+            "message": {
+                "id": {
+                    "capture": "new"
+                },
+                "method": "session/new",
+                "params": {
+                    "cwd": "/tmp",
+                    "mcpServers": []
+                }
+            }
+        },
+        {
+            "op": "send_response",
+            "message": {
+                "id": {
+                    "ref": "new"
+                },
+                "error": {
+                    "code": -32000,
+                    "message": "Authentication required"
+                }
+            }
+        }
+    ]
+}

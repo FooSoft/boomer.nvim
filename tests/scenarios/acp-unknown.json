@@ -1,0 +1,143 @@
+{
+    "version": 1,
+    "profile": "acp-v1",
+    "steps": [
+        {
+            "op": "expect_request",
+            "message": {
+                "id": {
+                    "capture": "init"
+                },
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": 1,
+                    "clientCapabilities": {},
+                    "clientInfo": {
+                        "name": "boomer",
+                        "version": "0.1.0"
+                    }
+                }
+            }
+        },
+        {
+            "op": "send_response",
+            "message": {
+                "id": {
+                    "ref": "init"
+                },
+                "result": {
+                    "protocolVersion": 1,
+                    "agentCapabilities": {},
+                    "authMethods": []
+                }
+            },
+            "fragments": [
+                1,
+                2,
+                7
+            ]
+        },
+        {
+            "op": "expect_request",
+            "message": {
+                "id": {
+                    "capture": "new"
+                },
+                "method": "session/new",
+                "params": {
+                    "cwd": "/tmp",
+                    "mcpServers": []
+                }
+            }
+        },
+        {
+            "op": "send_response",
+            "message": {
+                "id": {
+                    "ref": "new"
+                },
+                "result": {
+                    "sessionId": "s1"
+                }
+            }
+        },
+        {
+            "op": "expect_request",
+            "message": {
+                "id": {
+                    "capture": "prompt"
+                },
+                "method": "session/prompt",
+                "params": {
+                    "sessionId": "s1",
+                    "prompt": [
+                        {
+                            "type": "text",
+                            "text": "hello"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "op": "send_request",
+            "message": {
+                "id": "unknown",
+                "method": "_extension/unknown",
+                "params": {}
+            }
+        },
+        {
+            "op": "expect_response",
+            "message": {
+                "id": "unknown",
+                "error": {
+                    "code": -32601,
+                    "message": "Method not supported: _extension/unknown"
+                }
+            }
+        },
+        {
+            "op": "send_notification",
+            "messages": [
+                {
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "s1",
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {
+                                "type": "text",
+                                "text": "hel"
+                            }
+                        }
+                    }
+                },
+                {
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "s1",
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {
+                                "type": "text",
+                                "text": "lo"
+                            }
+                        }
+                    }
+                }
+            ]
+        },
+        {
+            "op": "send_response",
+            "message": {
+                "id": {
+                    "ref": "prompt"
+                },
+                "result": {
+                    "stopReason": "end_turn"
+                }
+            }
+        }
+    ]
+}

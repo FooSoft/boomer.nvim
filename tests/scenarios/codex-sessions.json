@@ -1,0 +1,113 @@
+{
+    "version": 1,
+    "profile": "codex-v2",
+    "steps": [
+        {
+            "op": "expect_request",
+            "message": {
+                "id": {
+                    "capture": "init"
+                },
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {
+                        "name": "boomer",
+                        "version": "0.1.0"
+                    },
+                    "capabilities": {
+                        "experimentalApi": false
+                    }
+                }
+            }
+        },
+        {
+            "op": "send_response",
+            "message": {
+                "id": {
+                    "ref": "init"
+                },
+                "result": {
+                    "codexHome": "fixture",
+                    "platformFamily": "fixture",
+                    "platformOs": "fixture",
+                    "userAgent": "fixture"
+                }
+            },
+            "fragments": [
+                1,
+                3
+            ]
+        },
+        {
+            "op": "expect_notification",
+            "message": {
+                "method": "initialized",
+                "params": {}
+            }
+        },
+        {
+            "op": "expect_request",
+            "message": {
+                "id": {
+                    "capture": "list1"
+                },
+                "method": "thread/list",
+                "params": {
+                    "cwd": "/tmp",
+                    "archived": false,
+                    "sortKey": "updated_at",
+                    "sortDirection": "desc"
+                }
+            }
+        },
+        {
+            "op": "send_response",
+            "message": {
+                "id": {
+                    "ref": "list1"
+                },
+                "result": {
+                    "data": [
+                        {
+                            "cliVersion": "0.167.1",
+                            "createdAt": 0,
+                            "cwd": "/tmp",
+                            "ephemeral": false,
+                            "id": "s2",
+                            "modelProvider": "openai",
+                            "preview": "fixture",
+                            "projectId": "fixture",
+                            "sessionId": "fixture",
+                            "source": "cli",
+                            "status": {
+                                "type": "notLoaded"
+                            },
+                            "turns": [],
+                            "updatedAt": 1794736802,
+                            "name": "Saved chat 2"
+                        },
+                        {
+                            "cliVersion": "0.167.1",
+                            "createdAt": 0,
+                            "cwd": "/tmp",
+                            "ephemeral": false,
+                            "id": "s1",
+                            "modelProvider": "openai",
+                            "preview": "fixture",
+                            "projectId": "fixture",
+                            "sessionId": "fixture",
+                            "source": "cli",
+                            "status": {
+                                "type": "notLoaded"
+                            },
+                            "turns": [],
+                            "updatedAt": 1794736801,
+                            "name": "Saved chat 1"
+                        }
+                    ],
+                    "nextCursor": null
+                }
+            }
+        }
+    ]
+}

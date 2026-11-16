@@ -1,0 +1,444 @@
+*boomer.txt*  Chat with coding agents in a Neovim prompt buffer
+
+License: MIT
+
+==============================================================================
+CONTENTS                                                     *boomer-contents*
+
+  1. Introduction ........................................ |boomer-intro|
+  2. Usage ............................................... |boomer-usage|
+  3. Commands ............................................ |boomer-commands|
+  4. Configuration ....................................... |boomer-config|
+  5. Agents .............................................. |boomer-agents|
+  6. Status .............................................. |boomer-status|
+  7. Events .............................................. |boomer-events|
+  8. Mappings ............................................ |boomer-mappings|
+  9. Highlights .......................................... |boomer-highlights|
+ 10. Lua API ............................................. |boomer-api|
+
+==============================================================================
+1. INTRODUCTION                                                 *boomer-intro*
+
+Boomer is a minimal chat buffer for coding agents. It speaks two protocols:
+
+- `codex`: the Codex App Server protocol (`codex app-server`).
+- `acp`: the Agent Client Protocol v1, used by GitHub Copilot CLI
+  (`copilot --acp`), Gemini CLI, Claude Agent and other ACP agents (see
+  |boomer-agents|).
+
+Requires Neovim 0.12 or newer and an installed, authenticated agent. The
+plugin loads lazily; nothing runs until the first command. Run
+`:checkhealth boomer` to check the configured agents.
+
+The agent runs with your environment, configuration and credentials, and
+enforces its own sandbox. Boomer never adds auto-approval flags.
+
+==============================================================================
+2. USAGE                                                        *boomer-usage*
+
+`:Boomer` opens a vertical split (see |boomer-window|) with a native
+|prompt-buffer| and starts Insert mode at the end of the draft. Type after
+`Prompt: ` and press <CR> to send; <S-CR> adds a line. The sent text stays in
+the transcript as typed, after its `Prompt:` label, and replies stream above
+the prompt, under `Agent:` labels, while you type. A picker opened from the
+prompt, such as for `/settings`, returns to Insert mode when it closes. <CR>
+keeps the draft if it is empty, or if a command cannot run now. CTRL-C
+(Insert or Normal mode) cancels the active turn.
+
+                                                        *boomer-queue*
+<CR> while a turn runs, or while the chat starts or loads a session, queues
+the draft instead of sending it. Queued prompts are shown as `Queued:` lines
+above the prompt (below it while the transcript is empty) and are sent one
+per turn, in order, each once the previous turn ends; only then do they enter
+the transcript. Plain prompts, agent commands and user `prompt` commands
+(|boomer-user-commands|, expanded when queued) can be queued; Boomer's own
+commands cannot. A draft committed with CTRL-J during a turn is queued too and
+marked `[queued]`. CTRL-C or `:Boomer cancel` cancels the turn and puts the
+queued prompts back into the draft, before the text being typed; prompts
+queued after that are sent once the cancelled turn ends. A failed turn, an
+agent exit or a session that fails to load also returns them to the draft.
+
+- One chat per Neovim instance. Hiding the window keeps it; |:bdelete| or
+  `:Boomer close` ends it. History is read-only; only the draft is sent.
+- Turns have no timeout. A cancel waits for the agent to stop the turn; if
+  the agent hangs, use `:Boomer close`.
+- Switching sessions (`/new`, `/resume`) reuses the agent process and opens
+  the session in a fresh buffer; the previous buffer is wiped. Loaded history
+  shows user and assistant messages only.
+- Each tool call is shown once as `[Tool: title]`.
+- Permission requests show their details in the chat and are answered with
+  |vim.ui.select()|. "Deny" is first, and dismissing the picker denies. If
+  the picker closes without an answer (some pickers do this on <Esc>),
+  `:Boomer` shows the request again.
+- If the agent exits, the chat shows the exit code and the end of its stderr.
+- The transcript is highlighted as Markdown with treesitter. Markers stay
+  visible ('conceallevel' 0), so copied text is the original source.
+- One blank line always separates the prompt from the transcript. When the
+  transcript does not end with one (such as while a reply streams), it is a
+  virtual line (|nvim_buf_set_extmark()| `virt_lines`), not buffer text.
+
+==============================================================================
+3. COMMANDS                                                  *boomer-commands*
+
+                                                        *:Boomer*
+:Boomer                 Open or focus the chat, starting the default agent.
+
+:Boomer {command} [{args}]
+                        Run {command}, one of the commands below. Commands
+                        and their arguments complete with
+                        |cmdline-completion|.
+
+                                                        *boomer-slash*
+The same commands can be typed in the prompt as `/command [args]`. Boomer
+runs them itself; they are not sent to the agent. A draft is a command only
+if it starts with `/name` followed by a space or the end of the draft, so text
+such as `/etc/hosts is empty` is sent unchanged. Start the draft with `//` to
+send text that begins with `/`.
+
+In the prompt, 'omnifunc' (|i_CTRL-X_CTRL-O|) completes command names and
+their arguments. The chat buffer's 'complete' option starts with `o`, so
+|i_CTRL-N| and 'autocomplete' offer them too. For a menu while typing: >lua
+
+    vim.api.nvim_create_autocmd('FileType', {
+        pattern = 'boomer',
+        command = 'setlocal autocomplete',
+    })
+<
+
+Commands that take an argument open a |vim.ui.select()| picker without one.
+
+/model [{model}]                                        *boomer-/model*
+        Set the session's model. {model} matches a model ID or its name.
+
+/effort [{level}]                                       *boomer-/effort*
+        Set the reasoning effort.
+
+/settings                                               *boomer-/settings*
+        Pick any setting the agent offers for this session.
+
+/permissions [{preset}]                                 *boomer-/permissions*
+        Choose what the agent may do without asking. Codex offers the
+        presets of its own `/permissions`:
+          `read-only`     Read Only: read files; ask before edits and
+                        commands (`on-request`, read-only sandbox).
+          `auto`          Default: edit and run commands in the workspace;
+                        ask for anything else (`on-request`,
+                        workspace-write sandbox).
+          `full-access`   Full Access: no sandbox and no approvals
+                        (`never`, `dangerFullAccess`). Use with care.
+        The preset applies to the next turn and later ones in this session;
+        a new or loaded session starts with the agent's configured policy.
+        If an ACP agent advertises its own `/permissions`, the line is sent
+        to it; otherwise the command is not available.
+
+/resume [{id}]                                          *boomer-/resume*
+        Load a saved session for the working directory. Without a chat, this
+        starts the default agent first.
+
+/new                                                    *boomer-/new*
+        Start a new session with the same agent.
+
+/agent [{name}]                                         *boomer-/agent*
+        Stop the current agent and start {name} in the same windows. This
+        also restarts an agent that exited. See |boomer-agents|.
+
+/compact [{focus}]                                      *boomer-/compact*
+        Summarize the conversation to free context. If the agent advertises
+        its own `/compact`, the line is sent to it, with {focus}. Otherwise
+        Codex compacts the thread natively.
+
+/usage                                                  *boomer-/usage*
+        Write context, token and cost usage into the chat. Works during a
+        turn.
+
+/help                                                   *boomer-/help*
+        List the available commands, including user and agent commands.
+
+:Boomer cancel                                          *boomer-cancel*
+        Cancel the active turn and return queued prompts to the draft
+        (|boomer-queue|) (Ex only; CTRL-C in the chat).
+
+:Boomer close                                           *boomer-close*
+        Stop the agent and wipe the chat buffer (Ex only).
+
+Commands that change the session need an idle chat. Run from |:Boomer|,
+`new`, `resume` and `agent` also need an empty draft. Agent and user `prompt`
+commands are queued during a turn (|boomer-queue|).
+
+                                                       *boomer-agent-commands*
+ACP agents advertise their own slash commands (for example Copilot's
+`/plan`). They complete like Boomer's and are sent to the agent as prompt
+text. A `/name` that is neither a Boomer, user nor agent command is not sent;
+Boomer warns and keeps the draft.
+
+==============================================================================
+4. CONFIGURATION                                               *boomer-config*
+
+                                                        *boomer.setup()*
+Calling `setup()` is optional. Options apply to the next chat; an invalid
+option raises an error. Defaults: >lua
+
+    require('boomer').setup({
+        -- Profile started by :Boomer.
+        agent = 'codex',
+        -- Agent profiles, merged with the built-in ones; see |boomer-agents|.
+        agents = {},
+        -- User slash commands; see |boomer-user-commands|.
+        commands = {},
+        -- Show the status in the chat's 'winbar': true, false, or a
+        -- function(status) returning a 'winbar' string; see |boomer-winbar|.
+        winbar = true,
+        -- Where the chat opens; see |boomer-window|.
+        window = { position = 'right', width = 0.5, height = 0.5, float = {} },
+        -- Labels of user and agent messages; the prompt is the user label
+        -- followed by a space. A profile's `label` overrides `agent`.
+        labels = { prompt = 'Prompt:', agent = 'Agent:' },
+    })
+<
+                                                        *boomer-window*
+`window` sets how a chat that is not shown opens:
+
+  position      `'right'`, `'left'`, `'top'`, `'bottom'` or `'float'`.
+                Splits span the whole editor (like |:botright|).
+  width         Width of `left`, `right` and `float` windows.
+  height        Height of `top`, `bottom` and `float` windows.
+  float         Extra |nvim_open_win()| config for floats, such as
+                `border`, `title` or `row` and `col`. The border defaults
+                to 'winborder'.
+
+A size below 1 is a fraction of the editor, otherwise a number of cells.
+Floats are centered and follow the editor size (|VimResized|). Examples: >lua
+
+    window = { position = 'left', width = 80 }
+    window = { position = 'bottom', height = 0.3 }
+    window = {
+        position = 'float',
+        width = 0.8,
+        height = 0.8,
+        float = { border = 'rounded', title = ' Boomer ' },
+    }
+<
+                                                        *boomer-user-commands*
+`commands` maps a name to a command, or to `false` to disable the built-in
+command of that name. User commands override agent commands. A command has
+`desc` (for /help and completion), optional `complete` (a list, or a
+function(status) returning one) and exactly one of:
+
+- `prompt`: text sent as a prompt. `$ARGUMENTS` is replaced by the
+  arguments; without it, arguments are appended after a blank line. It can
+  also be a function(args, ctx) that returns the text.
+- `run`: function(args, ctx) run in Neovim.
+
+`ctx` has `args`, `buf` (chat buffer), `status` (|boomer.status()|),
+`send(text)` (send a prompt, shown in the chat) and `write(text)` (write a
+note into the chat). Example: >lua
+
+    require('boomer').setup({
+        commands = {
+            review = {
+                desc = 'Review the working tree',
+                prompt = 'Review `git diff` and list problems. $ARGUMENTS',
+            },
+            alt = {
+                desc = 'Ask about the alternate file',
+                prompt = function(args)
+                    return ('About %s: %s'):format(vim.fn.bufname('#'), args)
+                end,
+            },
+            usage = false, -- let the agent handle /usage
+        },
+    })
+<
+==============================================================================
+5. AGENTS                                                      *boomer-agents*
+
+An agent profile names a protocol and the process that speaks it. The agent
+runs in Neovim's working directory (|getcwd()|) when the chat starts.
+Built-in profiles expect the executable on `$PATH`. The Codex profile: >lua
+
+    codex = { protocol = 'codex', command = 'codex', args = {} },
+<
+The ACP profiles (`protocol = 'acp'`):
+
+  Name          Command and args            Agent
+  copilot       `copilot --acp --stdio`       GitHub Copilot CLI
+  auggie        `auggie --acp`                Augment Auggie CLI
+  claude        `claude-agent-acp`            Claude Agent (Claude Code)
+  cline         `cline --acp`                 Cline
+  cursor        `cursor-agent acp`            Cursor
+  gemini        `gemini --acp`                Gemini CLI
+  goose         `goose acp`                   goose
+  kimi          `kimi acp`                    Kimi CLI
+  kiro          `kiro-cli acp`                Kiro CLI
+  opencode      `opencode acp`                OpenCode
+  qwen          `qwen --acp`                  Qwen Code
+  vibe          `vibe-acp`                    Mistral Vibe
+
+The `/agent` picker and completion list the profiles whose executable is
+installed, plus the default and current ones; `:Boomer agent {name}` accepts
+any profile.
+
+Fields given in `setup({ agents = ... })` replace the built-in fields of the
+same name (`args` is replaced, not appended). Profile fields:
+
+  protocol      `'codex'` or `'acp'` (required for new profiles).
+  command       Executable (required for new profiles).
+  args          List of arguments. Codex always runs
+                `{command} app-server --listen stdio://` followed by `args`.
+                ACP agents run `{command} {args}`.
+  env           Environment variables added to Neovim's environment.
+  model         Model for new sessions (ID or name).
+  effort        Reasoning effort for new sessions.
+  mode          Mode for new sessions (ACP), such as `plan`.
+  options       Table of ACP session config option IDs to values, applied
+                to new sessions.
+  label         Label of the agent's messages, such as `'Copilot:'`;
+                defaults to `labels.agent`.
+
+Defaults apply to new sessions only; a loaded session keeps its settings.
+A default the agent refuses is reported in the chat. Example: >lua
+
+    require('boomer').setup({
+        agent = 'copilot',
+        agents = {
+            copilot = { model = 'claude-sonnet-4.5', effort = 'high' },
+            gemini = {
+                command = 'npx',
+                args = { '-y', '@google/gemini-cli', '--acp' },
+            },
+            myagent = { protocol = 'acp', command = 'my-agent' },
+        },
+    })
+<
+==============================================================================
+6. STATUS                                                      *boomer-status*
+
+The chat's 'winbar' shows "boomer" followed by the agent, model and effort,
+mode, state, queued prompts, context use and cost, for example: >
+
+    boomer | copilot | Claude Sonnet 4.5 (high) | Plan | running | ctx 42%
+<
+It is set window-locally for the chat buffer only. Set `winbar = false` to
+disable it.
+
+                                                        *boomer-winbar*
+A function receives the status (|boomer.status()|) and returns a 'winbar'
+string; escape `%` in values as `%%`. An error shows an empty winbar. >lua
+
+    winbar = function(st)
+        return st.agent .. ' | ' .. st.state .. ' | ' .. (st.title or '')
+    end
+<
+                                                        *boomer.status()*
+`require('boomer').status()` returns a copy of the chat's status, or nil
+without a chat:
+
+  agent         Profile name.
+  protocol      `'codex'` or `'acp'`.
+  state         `starting`, `loading`, `ready`, `running`, `cancelling`,
+                `failed` or `closed`.
+  queued        Number of queued prompts (|boomer-queue|), nil when none.
+  session       Session ID.
+  title         Session title, if the agent names it.
+  model, effort, mode
+                Current values, as shown to the user.
+  permissions   Permission preset label (Codex), such as `Read Only`, or
+                `Custom` when the session's policy matches no preset.
+  context       `{ used = n, size = n }` tokens in the context window.
+  tokens        `{ total = n, input = n, output = n }`: session totals
+                (Codex) or the last turn (ACP, if reported).
+  cost          `{ amount = n, currency = s }` (ACP, if reported).
+  cwd           Working directory.
+  buf           Chat buffer.
+
+Fields are nil until the agent reports them.
+
+                                                        *boomer.statusline()*
+`require('boomer').statusline()` returns the status as one line, escaped for
+'statusline', or an empty string without a chat. It has the same items as
+the default winbar. For a statusline plugin: >lua
+
+    require('lualine').setup({
+        sections = { lualine_x = { require('boomer').statusline } },
+    })
+<
+==============================================================================
+7. EVENTS                                                      *boomer-events*
+
+Boomer triggers |User| autocommands:
+
+                                                        *BoomerStatus*
+BoomerStatus    After the status changed (at most once per event-loop tick).
+                `data` is the status table (|boomer.status()|).
+
+                                                        *BoomerTurnDone*
+BoomerTurnDone  After a turn ended. `data` has `buf`, and `result` (such as
+                `completed` or `cancelled`) or `error` (a message).
+
+Example: >lua
+
+    vim.api.nvim_create_autocmd('User', {
+        pattern = 'BoomerTurnDone',
+        callback = function(ev)
+            vim.notify('Boomer: ' .. (ev.data.result or ev.data.error))
+        end,
+    })
+<
+Turn progress is also shown as Neovim progress messages.
+
+==============================================================================
+8. MAPPINGS                                                  *boomer-mappings*
+
+Boomer defines no global mappings. In the chat buffer:
+
+  <CR>          (Insert) Send the draft or run the command; queue it during
+                a turn (|boomer-queue|).
+  CTRL-C        (Insert, Normal) Cancel the active turn; queued prompts
+                return to the draft.
+
+Map |:Boomer| commands with |<Cmd>|: >lua
+
+    vim.keymap.set('n', '<Leader>aa', '<Cmd>Boomer<CR>')
+    vim.keymap.set('n', '<Leader>am', '<Cmd>Boomer model<CR>')
+    vim.keymap.set('n', '<Leader>ac', '<Cmd>Boomer cancel<CR>')
+<
+==============================================================================
+9. HIGHLIGHTS                                              *boomer-highlights*
+
+Groups are defined with `default = true`; override them with
+|nvim_set_hl()|.
+
+  BoomerUserLabel       User labels ("Prompt:"), including the live prompt's.
+                        Links to |hl-Title|.
+  BoomerAssistantLabel  Agent labels ("Agent:"). Links to |hl-Title|.
+  BoomerSystem          Tool, permission and status lines. Links to
+                        `Comment`.
+  BoomerError           Errors. Links to `DiagnosticError`.
+  BoomerQueued          `Queued:` lines of queued prompts. Links to
+                        `Comment`.
+  BoomerWinbar          Winbar text. Links to |hl-WinBar|.
+  BoomerWinbarTitle     "boomer" at the start of the winbar. Links to
+                        `Function`.
+  BoomerWinbarBusy      Busy states in the winbar. Links to
+                        `DiagnosticWarn`.
+  BoomerWinbarError     `failed` and `closed` in the winbar. Links to
+                        `DiagnosticError`.
+
+==============================================================================
+10. LUA API                                                       *boomer-api*
+
+All functions are in `require('boomer')`. Command functions return true when
+the command started, or nil after a warning.
+
+  setup({opts})         See |boomer.setup()|.
+  open()                Open or focus the chat; returns its buffer.
+  run({line})           Run a |:Boomer| command line, such as `'model gpt-5'`.
+  model([{value}]), effort([{value}]), permissions([{preset}]),
+  settings(), resume([{id}]), new(), agent([{name}]),
+  compact([{focus}]), usage(), help(), cancel(), close()
+                        See |boomer-commands|.
+  status()              See |boomer.status()|.
+  statusline()          See |boomer.statusline()|.
+  winbar()              The chat window's 'winbar' value.
+
+ vim:tw=78:ts=8:ft=help:norl:
