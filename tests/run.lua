@@ -2051,7 +2051,29 @@ test('prompt queue', function()
         return state(buf).queued == 3
     end, 'committed prompt queued; transcript:\n' .. text(buf))
     assert(not has(buf, 'q3'), 'committed prompt left in the transcript')
+    -- So is the text being typed, through its last line.
+    local function draft_hl()
+        local row, col = unpack(api.nvim_buf_get_mark(buf, ':'))
+        local last = api.nvim_buf_line_count(buf) - 1
+        local len = #api.nvim_buf_get_lines(buf, last, last + 1, false)[1]
+        for _, m in ipairs(api.nvim_buf_get_extmarks(buf, -1, 0, -1, { details = true })) do
+            local d = m[4]
+            if
+                d.hl_group == 'BoomerPromptBusy'
+                and m[2] == row - 1
+                and m[3] == col
+                and d.end_row == last
+                and d.end_col == len
+            then
+                return true
+            end
+        end
+        return false
+    end
+    type_draft(buf, 'typing\nmore')
+    assert(draft_hl(), 'draft not busy')
     type_draft(buf, 'typing')
+    assert(draft_hl(), 'draft not busy')
     turn(buf, 4)
     assert(
         has(
@@ -2065,6 +2087,7 @@ test('prompt queue', function()
     assert(state(buf).queued == nil and virtual(buf) == '', virtual(buf))
     assert(prompt_hl('hl_group', 'BoomerUserLabel'), 'prompt label still busy')
     assert(prompt_hl('sign_hl_group', 'BoomerUserSign'), 'prompt sign still busy')
+    assert(not draft_hl(), 'draft still busy')
     finish()
 
     -- CTRL-C returns the queue to the draft, before the typed text; a prompt

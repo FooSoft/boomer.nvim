@@ -203,7 +203,7 @@ function View:set_queued(list)
     end
 end
 
--- Gray out the live prompt's label and sign while the agent is busy.
+-- Gray out the live prompt's label, sign and draft while the agent is busy.
 function View:set_busy(busy)
     if self.busy == busy then
         return
@@ -225,7 +225,8 @@ function View:mark(key, row, col, opts)
     end
 end
 
--- Highlight the live prompt's label like the transcript's user labels, and
+-- Highlight the live prompt's label like the transcript's user labels (and
+-- gray out the label, sign and draft while busy), and
 -- keep one blank line above the prompt: a virtual one when the output does
 -- not end with a blank line (streamed text continues its last line). Queued
 -- prompts are virtual lines between that blank line and the prompt. Virtual
@@ -245,6 +246,19 @@ function View:decorate()
             sign_text = self.signs.user,
             sign_hl_group = self.busy and 'BoomerPromptBusy' or 'BoomerUserSign',
         })
+    end
+    if self.busy then
+        local last = api.nvim_buf_line_count(self.buf) - 1
+        local _, col = self:row()
+        self:mark('draft', row, col, {
+            end_row = last,
+            end_col = #api.nvim_buf_get_lines(self.buf, last, last + 1, false)[1],
+            hl_group = 'BoomerPromptBusy',
+            priority = 200,
+            strict = false,
+        })
+    else
+        self:mark('draft')
     end
     local lines = {}
     for _, text in ipairs(self.queued) do

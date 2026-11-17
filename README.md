@@ -196,7 +196,7 @@ The chat opens in Insert mode with the cursor after `Prompt: `. The following ke
 | <kbd>Ctrl-C</kbd>      | Cancels the active turn and returns queued prompts to the draft |
 | <kbd>Shift-Tab</kbd>   | Switches to the next session mode                               |
 
-Prompts sent during a turn, or while the session loads, are queued and sent one per turn, in order; they are shown next to the prompt until they are sent, and the prompt's label and sign are grayed out meanwhile. Commands are never queued: they run at once. A draft that cannot be sent or run now, such as `/new` during a turn, stays in the prompt, and a warning says why. Errors and warnings are written into the transcript, and are also shown with `vim.notify` while the chat is hidden.
+Prompts sent during a turn, or while the session loads, are queued and sent one per turn, in order; they are shown next to the prompt until they are sent, and the prompt's label, sign and text are grayed out meanwhile. Commands are never queued: they run at once. A draft that cannot be sent or run now, such as `/new` during a turn, stays in the prompt, and a warning says why. Errors and warnings are written into the transcript, and are also shown with `vim.notify` while the chat is hidden.
 
 ## Status
 
