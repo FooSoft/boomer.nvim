@@ -41,10 +41,10 @@ enforces its own sandbox. Boomer never adds auto-approval flags.
 `Prompt: ` and press <CR> to send; <S-CR> adds a line. The sent text stays in
 the transcript as typed, after its `Prompt:` label, and replies stream above
 the prompt, under `Agent:` labels, while you type. A picker opened from the
-prompt, such as for `/model`, returns to Insert mode when it closes. A draft
-that cannot be sent or run now (empty, or a command that cannot run yet)
-stays in the prompt, and a warning says why. CTRL-C (Insert or Normal mode)
-cancels the active turn.
+prompt, such as for `/model`, returns to Insert mode when it closes. <CR> on
+a blank draft does nothing. A draft that cannot be sent or run now (a command
+that cannot run yet) stays in the prompt, and a warning says why. CTRL-C
+(Insert or Normal mode) cancels the active turn.
 
                                                         *boomer-queue*
 A prompt sent while a turn runs, or while the chat starts or loads a session,

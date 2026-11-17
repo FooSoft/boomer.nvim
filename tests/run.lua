@@ -714,6 +714,10 @@ test('codex chat', function()
     type_draft(buf, ' \n ')
     enter(buf)
     assert(draft(buf) == ' \n ', 'empty prompt was sent')
+    keys('A<C-j><Esc>')
+    vim.wait(20)
+    assert(draft(buf) == ' \n ', 'empty prompt was committed')
+    assert(not has(buf, 'Warning: The prompt is empty'), 'empty prompt warned')
     local row = row_of(buf, 'Prompt: hello')
     assert(marks(buf, row, 'hl_group', 'BoomerUserLabel'))
     await(function()
@@ -732,14 +736,14 @@ test('codex chat', function()
     assert(
         has(
             buf,
-            'Prompt: hello\nworld\n\nWarning: The prompt is empty\n\nAgent:\nhello\n\n'
+            'Prompt: hello\nworld\n\nAgent:\nhello\n\n'
                 .. busy
                 .. busy
                 .. '[completed]\n\nPrompt: keep'
         ),
         text(buf)
     )
-    row = row_of(buf, 'Warning: The prompt is empty')
+    row = row_of(buf, 'Warning: A turn is still active')
     assert(marks(buf, row, 'hl_group', 'BoomerWarning'))
 
     -- History is read-only; reopening reuses the chat; hiding keeps it.

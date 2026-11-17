@@ -519,8 +519,11 @@ local function run_command(c, name, args)
 end
 
 -- Submit a draft typed in the prompt; one that cannot be submitted now goes
--- back into the draft, after a warning saying why.
+-- back into the draft, after a warning saying why. A blank draft is ignored.
 local function enter(c, view, text)
+    if not text:find('%S') then
+        return unshift(view, text)
+    end
     local cmd = commands.parse(text)
     local ok
     if cmd and cmd.name then
@@ -577,6 +580,9 @@ local function attach(c, view)
             return
         end
         local text = view:draft()
+        if not text:find('%S') then
+            return
+        end
         view:set_draft('')
         enter(c, view, text)
     end, { buffer = buf, desc = 'Submit Boomer prompt' })
