@@ -42,8 +42,9 @@ the agent; unknown ones are not sent.
 Errors and warnings (such as a command that cannot run now) are written into the
 transcript; while the chat is hidden they are also shown with `vim.notify`.
 
-The chat window's winbar shows the agent, model, mode, state, context use and (for
-Codex) 5h/weekly rate limits, aligned to the right, e.g.
+The chat window's winbar shows a highlighted `Boomer` title on the left and the
+agent, model, mode, state, context use and (for Codex) 5h/weekly rate limits
+aligned to the right, e.g.
 `codex | gpt-5 (high) | ready | ctx 42% | 5h 7% | wk 33%`. For statusline
 plugins use `require('boomer').statusline()` or `.status()`; `User BoomerStatus`
 and `User BoomerTurnDone` autocommands report changes. In the chat, `<S-Tab>` picks the mode

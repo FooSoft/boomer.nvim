@@ -394,8 +394,12 @@ test('status rendering', function()
     assert(st.statusline(s):find('ctx 42%%', 1, true), st.statusline(s))
     local bar = st.winbar(s)
     local rendered = api.nvim_eval_statusline(bar, { use_winbar = true, maxwidth = 100 }).str
-    assert(rendered == string.rep(' ', 100 - #st.text(s)) .. st.text(s), rendered)
+    assert(rendered == 'Boomer' .. string.rep(' ', 94 - #st.text(s)) .. st.text(s), rendered)
+    assert(bar:find('^%%#BoomerWinbarTitle#Boomer%%#BoomerWinbar#'), bar)
     assert(bar:find('%#BoomerWinbarBusy#running', 1, true), bar)
+    -- A narrow window keeps the title and truncates the status from its left.
+    rendered = api.nvim_eval_statusline(bar, { use_winbar = true, maxwidth = 20 }).str
+    assert(rendered:find('^Boomer <.*0%.50 USD$') and #rendered == 20, rendered)
     assert(
         st.text({ agent = 'x', state = 'failed', context = { used = 1500 } })
             == 'x | failed | ctx 1.5k'
@@ -1389,7 +1393,8 @@ local function notify(method, params)
     return { op = 'send_notification', message = { method = method, params = params } }
 end
 
--- Evaluate the chat window's winbar as Neovim draws it.
+-- Evaluate the chat window's winbar as Neovim draws it; unless `padded`, without
+-- the default winbar's "Boomer" title and the gap after it.
 local function winbar(buf, padded)
     local win = vim.fn.win_findbuf(buf)[1]
     vim.g.statusline_winid = win
@@ -1397,7 +1402,7 @@ local function winbar(buf, padded)
     local opts = { winid = win, use_winbar = true, maxwidth = 200 }
     local s = api.nvim_eval_statusline(vim.wo[win].winbar, opts).str
     vim.g.statusline_winid = nil
-    return padded and s or (s:gsub('^ +', ''))
+    return padded and s or (s:gsub('^Boomer +', ''):gsub('^ +', ''))
 end
 
 test('codex slash commands', function()
@@ -1535,7 +1540,7 @@ test('codex slash commands', function()
     assert(done[1] == 'completed')
     local bar = winbar(buf)
     assert(bar == 'codex | m2 (high) | ready | ctx 42% | 5h 30%', bar)
-    assert(winbar(buf, true) == string.rep(' ', 200 - #bar) .. bar, winbar(buf, true))
+    assert(winbar(buf, true) == 'Boomer' .. string.rep(' ', 194 - #bar) .. bar, winbar(buf, true))
     assert(
         boomer.statusline() == 'codex | m2 (high) | ready | ctx 42%% | 5h 30%%',
         boomer.statusline()

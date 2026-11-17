@@ -345,13 +345,15 @@ A default the agent refuses is reported in the chat. Example: >lua
 ==============================================================================
 6. STATUS                                                      *boomer-status*
 
-The chat's 'winbar' shows the agent, model and effort, mode, state, queued
-prompts, context use, cost and Codex rate limits (5-hour and weekly, as
-percent used; highlighted from 90%), aligned to the right, for example: >
+The chat's 'winbar' shows a `Boomer` title on the left, then the agent, model
+and effort, mode, state, queued prompts, context use, cost and Codex rate
+limits (5-hour and weekly, as percent used; highlighted from 90%), aligned to
+the right, for example: >
 
-    copilot | Claude Sonnet 4.5 (high) | Plan | running | ctx 42%
-    codex | gpt-5 (high) | ready | ctx 42% | 5h 7% | wk 33%
+    Boomer      copilot | Claude Sonnet 4.5 (high) | Plan | running | ctx 42%
+    Boomer       codex | gpt-5 (high) | ready | ctx 42% | 5h 7% | wk 33%
 <
+In a narrow window the status is truncated from its left; the title stays.
 It is set window-locally for the chat buffer only. Set `winbar = false` to
 disable it.
 
@@ -393,7 +395,7 @@ Fields are nil until the agent reports them.
                                                         *boomer.statusline()*
 `require('boomer').statusline()` returns the status as one line, escaped for
 'statusline', or an empty string without a chat. It has the same items as
-the default winbar. For a statusline plugin: >lua
+the default winbar, without the title. For a statusline plugin: >lua
 
     require('lualine').setup({
         sections = { lualine_x = { require('boomer').statusline } },
@@ -458,6 +460,8 @@ Groups are defined with `default = true`; override them with
   BoomerQueued          `Queued:` lines of queued prompts. Links to
                         `Comment`.
   BoomerWinbar          Winbar text. Links to |hl-WinBar|.
+  BoomerWinbarTitle     The `Boomer` title in the winbar. Links to
+                        |hl-Title|.
   BoomerWinbarBusy      Busy states in the winbar. Links to
                         `DiagnosticWarn`.
   BoomerWinbarError     `failed`, `closed` and rate limits from 90% in the

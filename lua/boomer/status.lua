@@ -126,7 +126,8 @@ function M.text(st)
     )
 end
 
--- The same in 'winbar' syntax, right-aligned with highlight groups.
+-- The same in 'winbar' syntax with highlight groups: a "Boomer" title on the
+-- left, the status right-aligned and truncated from its left when narrow.
 ---@param st boomer.Status
 function M.winbar(st)
     local out = {}
@@ -134,7 +135,7 @@ function M.winbar(st)
         local text = escape(p[1])
         out[#out + 1] = p[2] and ('%#' .. p[2] .. '#' .. text .. '%#BoomerWinbar#') or text
     end
-    return '%#BoomerWinbar#%=' .. table.concat(out, sep)
+    return '%#BoomerWinbarTitle#Boomer%#BoomerWinbar# %<%=' .. table.concat(out, sep)
 end
 
 -- The plain text, escaped for 'statusline'.
