@@ -78,6 +78,11 @@ an agent exit or a session that fails to load also returns them to the draft.
   the picker closes without an answer (some pickers do this on <Esc>),
   `:Boomer` shows the request again.
 - If the agent exits, the chat shows the exit code and the end of its stderr.
+- Errors (`Error: ...`) and warnings (`Warning: ...`, such as a command that
+  cannot run now) are written into the transcript. While the chat is hidden
+  they are also given to |vim.notify()|, as are warnings without a chat.
+  Like other output, a warning ends a streamed reply; the rest of it
+  continues under a new label.
 - The transcript is highlighted as Markdown with treesitter. Markers stay
   visible ('conceallevel' 0), so copied text is the original source.
 - One blank line always separates the prompt from the transcript. When the
@@ -449,6 +454,7 @@ Groups are defined with `default = true`; override them with
   BoomerSystem          Tool, permission and status lines. Links to
                         `Comment`.
   BoomerError           Errors. Links to `DiagnosticError`.
+  BoomerWarning         Warnings. Links to `DiagnosticWarn`.
   BoomerQueued          `Queued:` lines of queued prompts. Links to
                         `Comment`.
   BoomerWinbar          Winbar text. Links to |hl-WinBar|.

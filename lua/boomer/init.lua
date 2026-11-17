@@ -69,6 +69,7 @@ local M = {}
 ---@field closed? boolean Closed by the user; callbacks are ignored.
 ---@field picks? integer Picker generation; see pick().
 ---@field progress? integer ID of the running progress message.
+---@field said? integer Warnings and errors written to the transcript so far.
 
 ---A queued prompt, or (without `text`) a command line run by `exec`.
 ---@class boomer.Queued
@@ -85,12 +86,6 @@ local group = vim.api.nvim_create_augroup('Boomer', { clear = true })
 ---@param opts? table
 function M.setup(opts)
     config.set(opts)
-end
-
--- Warn and return nil, so command functions can `return warn(...)`.
-local function warn(msg)
-    vim.notify(msg, vim.log.levels.WARN, { title = 'Boomer' })
-    return nil
 end
 
 -- Merge status fields (vim.NIL clears one) and announce the change.
@@ -122,11 +117,32 @@ local function progress(c, state, msg)
     c.progress = ok and state == 'running' and id or nil
 end
 
+-- Write a warning or error into the chat's transcript; also notify while the
+-- chat is hidden, and only notify without a chat.
+local function say(c, kind, msg, level)
+    msg = msg:gsub('%s+$', '')
+    if c and not c.closed and c.view:valid() then
+        c.said = (c.said or 0) + 1
+        c.view:write(kind .. ': ' .. msg, 'Boomer' .. kind)
+        if c.view:visible() then
+            return
+        end
+    end
+    vim.notify(msg, level, { title = 'Boomer' })
+end
+
+-- Warn in chat `c` (default: the current chat) and return nil, so command
+-- functions can `return warn(...)`.
+local function warn(msg, c)
+    say(c or chat, 'Warning', msg, vim.log.levels.WARN)
+    return nil
+end
+
 -- Write an error into the chat. After the agent exits, later errors only
 -- repeat the exit message, so they are dropped.
 local function report(c, msg)
     if not c.dead then
-        c.view:write('Error: ' .. msg:gsub('%s+$', ''), 'BoomerError')
+        say(c, 'Error', msg, vim.log.levels.ERROR)
     end
 end
 
@@ -349,7 +365,7 @@ end
 local function check(c, gate, typed)
     local msg = blocked(c, gate, typed)
     if msg then
-        warn(msg)
+        warn(msg, c)
         return false
     end
     return true
@@ -359,7 +375,7 @@ local function can_send(c, text)
     if not check(c, 'queue') then
         return false
     elseif not text:find('%S') then
-        warn('The prompt is empty')
+        warn('The prompt is empty', c)
         return false
     end
     return true
@@ -530,11 +546,7 @@ local function enqueue(c, e)
     c.prompts[#c.prompts + 1] = e
     sync_queue(c)
     if e.shown then
-        -- Appending inside the prompt callback, before Neovim adds the new
-        -- prompt line, would leave an extra blank line after the next write.
-        vim.schedule(function()
-            c.view:write('[queued]')
-        end)
+        c.view:write('[queued]')
     end
     drain(c)
 end
@@ -694,7 +706,7 @@ local function stop()
         restore(c)
     end
     if not c or not c.busy then
-        return queued or warn('No active Boomer turn')
+        return queued or warn('No active Boomer turn', c)
     end
     interrupt(c)
     return true
@@ -706,10 +718,11 @@ local function attach(c, view)
     local buf = view.buf
     vim.fn.prompt_setcallback(buf, function(text)
         -- Neovim already committed the input (<C-j> bypasses the <CR> guard),
-        -- so a rejected draft is marked as such.
+        -- so a rejected draft is marked as such, unless a warning says why.
         local cmd = commands.parse(text)
+        local said = c.said
         view:submitted(text)
-        if not submit_draft(c, text, true) then
+        if not submit_draft(c, text, true) and c.said == said then
             view:write(cmd and cmd.name and '[not run]' or '[not sent]')
         end
     end)
@@ -843,7 +856,7 @@ end
 local function choose(c, fresh)
     local function dismiss(msg)
         if msg then
-            warn(msg)
+            warn(msg, c)
         end
         if fresh then
             load(c)
@@ -1109,7 +1122,7 @@ local function choose_setting(name, arg)
                 end
             end
             if #settings == 0 then
-                return warn('This session advertises no selectable settings')
+                return warn('This session advertises no selectable settings', c)
             end
             return pick(c, settings, { prompt = 'Boomer setting:' }, function(setting, e)
                 if e then
@@ -1121,13 +1134,13 @@ local function choose_setting(name, arg)
         end
         local setting, value, msg = find_setting(list, name, arg or '')
         if not setting then
-            return warn(msg)
+            return warn(msg, c)
         elseif not value then
             return pick_choice(setting)
         end
         local choice, why = find_choice(name, setting, value)
         if not choice then
-            return warn(why)
+            return warn(why, c)
         end
         chosen(setting, choice)
     end)
@@ -1303,9 +1316,9 @@ function M.compact(focus)
         local line = '/compact' .. (focus and (' ' .. focus) or '')
         submit(c, line, line, committed)
     elseif not c.client.compact then
-        return warn('This agent cannot compact the conversation')
+        return warn('This agent cannot compact the conversation', c)
     elseif focus then
-        return warn('This agent takes no compaction instructions')
+        return warn('This agent takes no compaction instructions', c)
     else
         dispatch(c, '/compact', committed)
     end
@@ -1348,7 +1361,7 @@ function M.cancel()
         interrupt(c)
         return true
     end
-    return n > 0 or warn('Nothing to cancel')
+    return n > 0 or warn('Nothing to cancel', c)
 end
 
 -- Stop the agent and wipe the chat buffer.

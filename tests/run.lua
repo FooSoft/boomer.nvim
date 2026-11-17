@@ -215,6 +215,11 @@ local function marks(buf, row, field, group)
     return false
 end
 
+-- Whether the transcript has the warning `msg`.
+local function warned(buf, msg)
+    return has(buf, 'Warning: ' .. msg)
+end
+
 local function row_of(buf, needle)
     for i, line in ipairs(api.nvim_buf_get_lines(buf, 0, -1, false)) do
         if line:find(needle, 1, true) then
@@ -631,10 +636,20 @@ test('codex chat', function()
     assert(api.nvim_get_current_win() == code, 'streaming stole focus')
     assert(draft(buf) == 'keep\nthis', 'streaming overwrote the draft')
     assert(progress[#progress].status == 'success')
+    -- Warnings are written into the transcript; one ends a streamed reply.
+    local busy = 'Warning: A turn is still active; wait or use /cancel\n\n'
     assert(
-        has(buf, 'Prompt: hello\nworld\n\nAgent:\nhello\n\n[completed]\n\nPrompt: keep'),
+        has(
+            buf,
+            'Prompt: hello\nworld\n\nWarning: The prompt is empty\n\nAgent:\nhello\n\n'
+                .. busy
+                .. busy
+                .. '[completed]\n\nPrompt: keep'
+        ),
         text(buf)
     )
+    row = row_of(buf, 'Warning: The prompt is empty')
+    assert(marks(buf, row, 'hl_group', 'BoomerWarning'))
 
     -- History is read-only; reopening reuses the chat; hiding keeps it.
     api.nvim_set_current_win(vim.fn.win_findbuf(buf)[1])
@@ -800,7 +815,7 @@ test('acp chat', function()
     turn(buf)
     assert(count(buf, 'Agent:\nhello') == 1)
     boomer.permissions('auto')
-    assert(notices[#notices] == 'This agent offers no permissions setting', notices[#notices])
+    assert(warned(buf, 'This agent offers no permissions setting'), text(buf))
     finish()
 
     buf = open(load('acp-final-exit'), 'copilot')
@@ -859,7 +874,7 @@ test('settings', function()
     ready(buf)
     -- A setting without a command of its own is named by /settings.
     send(buf, '/settings nope false')
-    assert(notices[#notices] == 'Unknown setting: nope', notices[#notices])
+    assert(warned(buf, 'Unknown setting: nope'), text(buf))
     send(buf, '/settings enabled false')
     await(function()
         return has(buf, 'Prompt: /settings enabled false\n\n[Setting: enabled = false]')
@@ -1114,10 +1129,13 @@ test('cancel', function()
     )
     buf = open(scenario)
     send(buf)
+    -- Errors are notified too while the chat is hidden.
+    vim.cmd('close')
     boomer.cancel()
     await(function()
-        return has(buf, 'cancel failed: no') and status(buf, 'running')
+        return has(buf, 'Error: cancel failed: no') and status(buf, 'running')
     end, 'cancel failure')
+    assert(notices[#notices] == 'cancel failed: no', notices[#notices])
     assert(boomer.cancel())
     await(function()
         return has(buf, '[cancelled]') and status(buf, 'ready')
@@ -1350,7 +1368,7 @@ test('sessions', function()
     ready(buf)
     boomer.resume()
     await(function()
-        return notices[#notices] == 'session list refused'
+        return warned(buf, 'session list refused')
     end, 'list error')
     assert(api.nvim_buf_is_valid(buf) and status(buf, 'ready'))
     finish()
@@ -1495,7 +1513,9 @@ test('codex slash commands', function()
     type_draft(buf, '/bogus x')
     enter(buf)
     assert(draft(buf) == '/bogus x', draft(buf))
-    assert(notices[#notices]:find('Unknown command /bogus', 1, true), notices[#notices])
+    assert(warned(buf, 'Unknown command /bogus'), text(buf))
+    local tail = 'as text\n\nPrompt: /bogus x'
+    assert(text(buf):sub(-#tail) == tail, text(buf))
     type_draft(buf, '')
 
     send(buf, '/model m2')
@@ -1940,6 +1960,13 @@ test('prompt queue', function()
         nil,
         { commands = { review = { prompt = 'Review $ARGUMENTS' } } }
     )
+    -- A committed command that cannot run is followed by its warning only,
+    -- after one blank line also as the first output.
+    ready(buf)
+    type_draft(buf, '/cancel')
+    keys('A<C-j><Esc>')
+    local first = 'Prompt: /cancel\n\nWarning: Nothing to cancel\n\nPrompt: '
+    assert(text(buf) == first, text(buf))
     send(buf, 'hello')
     await(function()
         return has(buf, 'Agent:\nhello')
@@ -2007,15 +2034,17 @@ test('prompt queue', function()
     enter(buf)
     assert(status(buf, 'cancelling') and draft(buf) == '', draft(buf))
     assert(state(buf).queued == nil and virtual(buf) == '', virtual(buf))
-    assert(has(buf, 'Prompt: /cancel\n\n[cancelled 2 queued]'), text(buf))
+    assert(has(buf, 'Prompt: /cancel\n\n[cancelled 2 queued]\n\nPrompt: '), text(buf))
     type_draft(buf, 'after')
     enter(buf)
     await(function()
-        return has(buf, '[cancelled]\n\nPrompt: after') and count(buf, '[completed]') == 1
+        return has(buf, '[cancelled 2 queued]\n\n[cancelled]\n\nPrompt: after')
+            and count(buf, '[completed]') == 1
     end, '/cancel; transcript:\n' .. text(buf))
     assert(not has(buf, 'Prompt: q1') and not has(buf, 'Prompt: q2'), text(buf))
     send(buf, '/cancel')
-    assert(notices[#notices] == 'Nothing to cancel', notices[#notices])
+    local tail = 'Prompt: /cancel\n\nWarning: Nothing to cancel\n\nPrompt: '
+    assert(text(buf):sub(-#tail) == tail, text(buf))
     finish()
 
     -- Prompts queued while the session starts can be taken back with CTRL-C,
@@ -2184,7 +2213,7 @@ test('command queue', function()
     type_draft(buf, '/new')
     enter(buf)
     assert(draft(buf) == '/new', draft(buf))
-    assert(notices[#notices]:find('A turn is still active', 1, true), notices[#notices])
+    assert(warned(buf, 'A turn is still active'), text(buf))
     type_draft(buf, '')
     local queued = 'Queued: /model m2\nQueued: /effort high\nQueued: /mode plan\n'
         .. 'Queued: q1\nQueued: /permissions allow-all'
@@ -2455,9 +2484,9 @@ test('codex protocol edges', function()
     -- Commands that need no agent traffic.
     assert(boomer.resume('s1'), 'resume the current session')
     assert(not boomer.compact('focus'))
-    assert(notices[#notices] == 'This agent takes no compaction instructions', notices[#notices])
+    assert(warned(buf, 'This agent takes no compaction instructions'), text(buf))
     boomer.permissions('bogus')
-    assert(notices[#notices] == 'Unknown permissions: bogus', notices[#notices])
+    assert(warned(buf, 'Unknown permissions: bogus'), text(buf))
     vim.ui.select = pick('codex (codex) [current]')
     assert(boomer.agent())
     pause(20)
@@ -2594,10 +2623,10 @@ test('acp protocol edges', function()
     assert(has(buf, 'Prompt: /plan go'), text(buf))
 
     assert(not boomer.compact())
-    assert(notices[#notices] == 'This agent cannot compact the conversation', notices[#notices])
+    assert(warned(buf, 'This agent cannot compact the conversation'), text(buf))
     boomer.resume()
     await(function()
-        return notices[#notices] == 'this agent cannot list sessions'
+        return warned(buf, 'this agent cannot list sessions')
     end, 'list unsupported')
     boomer.resume('s5')
     await(function()
@@ -2721,15 +2750,22 @@ test('user commands and chat edges', function()
         },
     })
     ready(buf)
-    assert(not boomer.run('bad') and notices[#notices] == '/bad: oops', notices[#notices])
-    assert(not boomer.run('empty') and notices[#notices] == '/empty produced an empty prompt')
-    assert(not boomer.run('broken') and notices[#notices] == '/broken: nope', notices[#notices])
-    assert(not boomer.run('nope') and notices[#notices]:find('Unknown command /nope', 1, true))
+    local notified = #notices
+    assert(not boomer.run('bad') and warned(buf, '/bad: oops'), text(buf))
+    assert(not boomer.run('empty') and warned(buf, '/empty produced an empty prompt'))
+    assert(not boomer.run('broken') and warned(buf, '/broken: nope'), text(buf))
+    assert(not boomer.run('nope') and warned(buf, 'Unknown command /nope'))
+    assert(#notices == notified, 'notified while the chat is shown: ' .. notices[#notices])
+    -- A hidden chat is notified too.
+    vim.cmd('close')
+    assert(not boomer.run('bad') and count(buf, 'Warning: /bad: oops') == 2, text(buf))
+    assert(notices[#notices] == '/bad: oops', notices[#notices])
+    boomer.open()
     local files = vim.fn.getcompletion('Boomer files ', 'cmdline')
     assert(vim.deep_equal(files, { 'codex.lua', 'b.lua' }), vim.inspect(files))
     assert(vim.deep_equal(vim.fn.getcompletion('Boomer fixed t', 'cmdline'), { 'two' }))
 
-    assert(boomer.run('go x'), notices[#notices])
+    assert(boomer.run('go x'), text(buf))
     turn(buf)
     assert(has(buf, 'Prompt: sent x'), text(buf))
     -- The omnifunc only completes on the prompt line.
