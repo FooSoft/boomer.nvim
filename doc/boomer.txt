@@ -242,6 +242,9 @@ option raises an error. Defaults: >lua
         -- Labels of user and agent messages; the prompt is the user label
         -- followed by a space. A profile's `label` overrides `agent`.
         labels = { prompt = 'Prompt:', agent = 'Agent:' },
+        -- Gutter signs of user and agent messages, or false; see
+        -- |boomer-signs|.
+        signs = { prompt = '▌', agent = '▌' },
     })
 <
                                                         *boomer-window*
@@ -266,6 +269,16 @@ Floats are centered and follow the editor size (|VimResized|). Examples: >lua
         height = 0.8,
         float = { border = 'rounded', title = ' Boomer ' },
     }
+<
+                                                        *boomer-signs*
+`signs` marks every line of a message, and of the draft, with a sign of its
+role in the sign column: `prompt` for user messages and `agent` for agent
+messages. Signs are 1 or 2 cells wide; tool, permission and status lines get
+none. They are drawn by the chat's 'statuscolumn', on every screen row of
+wrapped lines, which replaces the sign column ('signcolumn' is `no`) for the
+chat buffer only. Set `signs = false` to disable them. >lua
+
+    signs = { prompt = '┃', agent = '│' }
 <
                                                         *boomer-user-commands*
 `commands` maps a name to a command, or to `false` to disable the built-in
@@ -469,8 +482,13 @@ Groups are defined with `default = true`; override them with
 |nvim_set_hl()|.
 
   BoomerUserLabel       User labels ("Prompt:"), including the live prompt's.
-                        Links to |hl-Title|.
-  BoomerAssistantLabel  Agent labels ("Agent:"). Links to |hl-Title|.
+                        Bold, in the color of `Function`.
+  BoomerAssistantLabel  Agent labels ("Agent:"). Bold, in the color of
+                        `String`.
+  BoomerUserSign        Signs of user messages and the draft
+                        (|boomer-signs|). Links to `BoomerUserLabel`.
+  BoomerAssistantSign   Signs of agent messages. Links to
+                        `BoomerAssistantLabel`.
   BoomerSystem          Tool, permission and status lines. Links to
                         `Comment`.
   BoomerError           Errors. Links to `DiagnosticError`.

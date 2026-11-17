@@ -25,6 +25,7 @@ require('boomer').setup({
     winbar = true,
     window = { position = 'right', width = 0.5, height = 0.5, float = {} },
     labels = { prompt = 'Prompt:', agent = 'Agent:' },
+    signs = { prompt = '▌', agent = '▌' },
 })
 ```
 
@@ -91,6 +92,10 @@ window = { position = 'float', width = 0.8, height = 0.8, float = { border = 'ro
 #### `labels`
 
 Specifies the labels of user and agent messages. The prompt is the user label followed by a space; a profile's `label` overrides `agent`.
+
+#### `signs`
+
+Specifies the signs shown in the sign column next to every line of user messages (and the draft) and agent messages, 1 or 2 cells wide, or `false` to show none. They are drawn by the chat buffer's `statuscolumn`, on every row of wrapped lines, and highlighted with `BoomerUserSign` and `BoomerAssistantSign`, which link to the labels' groups `BoomerUserLabel` and `BoomerAssistantLabel`.
 
 ## Agents
 

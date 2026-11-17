@@ -269,6 +269,7 @@ local function new_view(opts)
     local options = require('boomer.config').options
     return require('boomer.view').new({
         labels = opts.labels or { user = options.labels.prompt, agent = options.labels.agent },
+        signs = options.signs and { user = options.signs.prompt, agent = options.signs.agent },
         window = vim.tbl_deep_extend('force', options.window, opts.window or {}),
     })
 end
@@ -301,6 +302,8 @@ test('commands', function()
     assert(not pcall(boomer.setup, { window = { size = 10 } }))
     assert(not pcall(boomer.setup, { labels = { agent = ' ' } }))
     assert(not pcall(boomer.setup, { labels = { user = 'x' } }))
+    assert(not pcall(boomer.setup, { signs = { prompt = 'abc' } }), 'sign too wide')
+    assert(not pcall(boomer.setup, { signs = { user = '|' } }))
     assert(not pcall(boomer.setup, { agents = { codex = { label = '' } } }))
 
     local config = require('boomer.config')
@@ -349,6 +352,18 @@ test('commands', function()
     assert(vim.deep_equal(o.window.float, { border = { '+', '-' } }), vim.inspect(o.window))
     assert(o.labels.prompt == 'Prompt:' and o.labels.agent == 'Bot:')
     assert(o.winbar == false)
+    boomer.setup({ signs = { agent = '|' } })
+    assert(vim.deep_equal(config.options.signs, { prompt = '▌', agent = '|' }))
+    boomer.setup({ signs = false })
+    assert(config.options.signs == false)
+    boomer.setup({ signs = true })
+    assert(config.options.signs.prompt == '▌')
+    boomer.setup({
+        window = { position = 'float', float = { border = { '+', '-' } } },
+        labels = { agent = 'Bot:' },
+        winbar = false,
+        agents = { copilot = { label = 'Copilot:' } },
+    })
     assert(
         config.resolve('codex').label == 'Bot:' and config.resolve('copilot').label == 'Copilot:'
     )
@@ -524,10 +539,11 @@ test('view rendering', function()
 
     api.nvim_set_hl(0, 'BoomerUserLabel', { fg = '#234567' })
     vim.cmd.colorscheme('default')
-    assert(
-        api.nvim_get_hl(0, { name = 'BoomerUserLabel' }).link == 'Title',
-        'defaults not restored'
-    )
+    local user = api.nvim_get_hl(0, { name = 'BoomerUserLabel' })
+    assert(user.bold and user.fg == api.nvim_get_hl(0, { name = 'Function', link = false }).fg)
+    local agent = api.nvim_get_hl(0, { name = 'BoomerAssistantLabel' })
+    assert(agent.bold and agent.fg ~= user.fg, 'roles share a color')
+    assert(api.nvim_get_hl(0, { name = 'BoomerUserSign' }).link == 'BoomerUserLabel')
     api.nvim_buf_delete(buf, { force = true })
 
     -- Custom labels; trailing space on the user label is not doubled.
@@ -537,6 +553,71 @@ test('view rendering', function()
     assert(text(view.buf) == 'Bot:\nhi\n\nMe> yo\nMe> ', text(view.buf))
     assert(vim.fn.prompt_getprompt(view.buf) == 'Me> ')
     api.nvim_buf_delete(view.buf, { force = true })
+end)
+
+test('gutter signs', function()
+    -- Each message's rows, and the draft's, show its role's sign; system lines none.
+    local view = new_view()
+    local buf = view.buf
+    view:open()
+    assert(vim.wo.signcolumn == 'no' and vim.wo.statuscolumn ~= '', vim.wo.statuscolumn)
+    view:message('user', 'hello\nworld', 'u1')
+    view:message('agent', 'Hi', 'a1')
+    view:message('agent', ' there\nsecond\n', 'a1')
+    view:write('[Tool: ls]')
+    view:message('agent', 'done', 'a2')
+    view:set_draft('draft\nmore')
+    assert(
+        text(buf)
+            == 'Prompt: hello\nworld\n\nAgent:\nHi there\nsecond\n\n[Tool: ls]\n\n'
+                .. 'Agent:\ndone\nPrompt: draft\nmore',
+        text(buf)
+    )
+    local function signs()
+        local out = {}
+        for row = 0, api.nvim_buf_line_count(buf) - 1 do
+            out[#out + 1] = marks(buf, row, 'sign_hl_group', 'BoomerUserSign') and 'U'
+                or marks(buf, row, 'sign_hl_group', 'BoomerAssistantSign') and 'A'
+                or '.'
+        end
+        return table.concat(out)
+    end
+    assert(signs() == 'UU.AAA...AAUU', signs())
+    -- Typing in the draft extends its sign.
+    keys('Go<Esc>')
+    assert(signs() == 'UU.AAA...AAUUU', signs())
+
+    -- The status column draws the sign on every screen row of wrapped lines.
+    local win = api.nvim_get_current_win()
+    view:message('agent', ' ' .. ('word '):rep(math.floor(api.nvim_win_get_width(win) / 2)), 'a2')
+    local lnum = row_of(buf, 'done') + 1
+    assert(vim.wo.wrap and #api.nvim_buf_get_lines(buf, lnum - 1, lnum, false)[1] > 100)
+    api.nvim_win_set_cursor(win, { lnum, 0 })
+    vim.cmd('redraw!')
+    local first = vim.fn.screenpos(win, lnum, 1).row
+    local last = vim.fn.screenpos(win, lnum, vim.fn.col({ lnum, '$' }) - 1).row
+    local col = vim.fn.win_screenpos(win)[2]
+    assert(last > first, 'line not wrapped')
+    local agent = vim.fn.screenattr(first, col)
+    for row = first, last do
+        assert(vim.fn.screenstring(row, col) == '▌', 'no sign on screen row ' .. row)
+        assert(vim.fn.screenattr(row, col) == agent, 'sign color on screen row ' .. row)
+    end
+    -- System lines have none; the draft's has the user's color.
+    assert(vim.fn.screenstring(vim.fn.screenpos(win, lnum - 3, 1).row, col) == ' ')
+    local draft = vim.fn.screenpos(win, lnum + 1, 1).row
+    assert(vim.fn.screenstring(draft, col) == '▌' and vim.fn.screenattr(draft, col) ~= agent)
+    api.nvim_buf_delete(buf, { force = true })
+
+    boomer.setup({ signs = false })
+    view = new_view()
+    vim.wo.signcolumn = 'no'
+    view:open()
+    view:message('agent', 'hi')
+    assert(vim.wo.signcolumn == 'no')
+    assert(#api.nvim_buf_get_extmarks(view.buf, -1, 0, -1, { details = true, type = 'sign' }) == 0)
+    api.nvim_buf_delete(view.buf, { force = true })
+    boomer.setup()
 end)
 
 test('window layout', function()

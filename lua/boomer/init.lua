@@ -631,6 +631,8 @@ local function new_view(c, draft)
     c.view = require('boomer.view').new({
         winbar = config.options.winbar ~= false and "%{%v:lua.require'boomer'.winbar()%}",
         labels = { user = config.options.labels.prompt, agent = c.opts.label },
+        signs = config.options.signs
+            and { user = config.options.signs.prompt, agent = config.options.signs.agent },
         window = config.options.window,
     })
     attach(c, c.view)

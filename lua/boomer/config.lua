@@ -46,6 +46,7 @@ local defaults = {
     winbar = true,
     window = { position = 'right', width = 0.5, height = 0.5, float = {} },
     labels = { prompt = 'Prompt:', agent = 'Agent:' },
+    signs = { prompt = '▌', agent = '▌' },
 }
 
 -- Current options; replaced as a whole by set().
@@ -56,6 +57,13 @@ local function label(v)
     return type(v) == 'string' and v:find('%S') ~= nil
 end
 local non_empty = { label, 'non-empty string' }
+local sign = {
+    function(v)
+        local width = type(v) == 'string' and vim.fn.strdisplaywidth(v) or 0
+        return width >= 1 and width <= 2
+    end,
+    'string of 1 or 2 cells',
+}
 local size = {
     function(v)
         return type(v) == 'number' and v > 0
@@ -151,6 +159,7 @@ function M.set(opts)
         winbar = { 'boolean', 'function' },
         window = 'table',
         labels = 'table',
+        signs = { 'table', 'boolean' },
     })
     if opts.window then
         check('window', opts.window, {
@@ -165,6 +174,9 @@ function M.set(opts)
     end
     if opts.labels then
         check('labels', opts.labels, { prompt = non_empty, agent = non_empty })
+    end
+    if type(opts.signs) == 'table' then
+        check('signs', opts.signs, { prompt = sign, agent = sign })
     end
     for name, p in pairs(opts.agents or {}) do
         check('agents.' .. tostring(name), p, agent_fields)
@@ -187,7 +199,11 @@ function M.set(opts)
     local o = vim.tbl_deep_extend('force', vim.deepcopy(defaults), {
         window = opts.window,
         labels = opts.labels,
+        signs = type(opts.signs) == 'table' and opts.signs or nil,
     })
+    if opts.signs == false then
+        o.signs = false
+    end
     -- These replace the defaults as a whole rather than being merged into them
     -- (a float `border` list, for example).
     o.window.float = vim.deepcopy(opts.window and opts.window.float or {})

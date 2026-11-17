@@ -8,18 +8,22 @@
 -- their label on its own line followed by the text; user messages are the
 -- prompt (the user label and a space) followed by the text, as Neovim
 -- commits submitted drafts. Extmarks in `ns` highlight labels and system
--- lines; extmarks in `prompt_ns` decorate the live prompt and follow it
+-- lines; extmarks in `sign_ns` span messages to show their role's sign;
+-- extmarks in `prompt_ns` decorate the live prompt and follow it
 -- (View:decorate). Nothing else tracks positions.
 local api = vim.api
 local ns = api.nvim_create_namespace('boomer')
+local sign_ns = api.nvim_create_namespace('boomer.sign')
 local prompt_ns = api.nvim_create_namespace('boomer.prompt')
 
 ---@class boomer.View
 ---@field buf integer
 ---@field labels { user: string, agent: string }
+---@field signs? { user: string, agent: string } Gutter signs of messages; nil for none.
 ---@field prompt string Prompt text: the user label and a space.
 ---@field window? table config `window` option.
----@field current? { role: string, id: string? } Message being streamed.
+---@field current? { role: string, id: string?, sign: integer? } Message being streamed,
+--- with the extmark ID of its sign.
 ---@field submit? boolean Neovim starts the next output on a new line (b_prompt_append_new_line):
 --- set initially and after a committed draft, cleared by appending.
 ---@field marks table<string, integer> Extmark IDs of the live prompt's decorations.
@@ -27,11 +31,20 @@ local prompt_ns = api.nvim_create_namespace('boomer.prompt')
 local View = {}
 View.__index = View
 
--- Highlight groups, linked by default so colorschemes can override them.
+-- Highlight groups, defined by default so colorschemes can override them.
+-- Labels are bold in their role's color; signs follow the labels.
 local function highlights()
+    for group, base in pairs({ BoomerUserLabel = 'Function', BoomerAssistantLabel = 'String' }) do
+        local hl = api.nvim_get_hl(0, { name = base, link = false })
+        hl.bold, hl.default = true, true
+        if hl.cterm then
+            hl.cterm.bold = true
+        end
+        api.nvim_set_hl(0, group, hl)
+    end
     for group, link in pairs({
-        BoomerUserLabel = 'Title',
-        BoomerAssistantLabel = 'Title',
+        BoomerUserSign = 'BoomerUserLabel',
+        BoomerAssistantSign = 'BoomerAssistantLabel',
         BoomerSystem = 'Comment',
         BoomerError = 'DiagnosticError',
         BoomerWarning = 'DiagnosticWarn',
@@ -53,7 +66,9 @@ vim.treesitter.language.register('markdown', 'boomer')
 
 -- opts.winbar: 'winbar' value for windows showing the chat (window-local per buffer).
 -- opts.labels: { user = 'Prompt:', agent = 'Agent:' }; the prompt is the user label
--- followed by a space. opts.window: how open() shows the chat (config `window`).
+-- followed by a space. opts.signs: { user = '▌', agent = '▌' }, signs shown in the
+-- gutter next to messages, or nil. opts.window: how open() shows the chat
+-- (config `window`).
 ---@return boomer.View
 function View.new(opts)
     local buf = api.nvim_create_buf(false, true)
@@ -63,6 +78,7 @@ function View.new(opts)
         {
             buf = buf,
             labels = labels,
+            signs = opts.signs,
             prompt = prompt,
             window = opts.window,
             marks = {},
@@ -97,13 +113,45 @@ function View.new(opts)
     api.nvim_create_autocmd('BufWinEnter', {
         buffer = buf,
         callback = function()
-            vim.wo[0][0].conceallevel = 0
+            self:set_window_options()
             if opts.winbar then
                 vim.wo[0][0].winbar = opts.winbar
             end
         end,
     })
     return self
+end
+
+-- Options of the current window, local to the chat buffer.
+function View:set_window_options()
+    vim.wo[0][0].conceallevel = 0
+    if self.signs then
+        -- The sign column shows a sign only on the first screen row of a
+        -- wrapped line; the status column draws it on every row instead.
+        vim.wo[0][0].signcolumn = 'no'
+        vim.wo[0][0].statuscolumn = "%!v:lua.require'boomer.view'.statuscolumn()"
+    end
+end
+
+-- 'statuscolumn' of chat windows: the sign of the message (or draft) on the
+-- drawn line, on each of its screen rows; none on virtual lines.
+function View.statuscolumn()
+    local buf = api.nvim_win_get_buf(vim.g.statusline_winid)
+    local row = vim.v.lnum - 1
+    if vim.v.virtnum >= 0 then
+        for _, n in ipairs({ sign_ns, prompt_ns }) do
+            local found = api.nvim_buf_get_extmarks(buf, n, { row, 0 }, { row, -1 }, {
+                details = true,
+                overlap = true,
+                type = 'sign',
+            })
+            local d = found[1] and found[1][4]
+            if d then
+                return ('%%#%s#%s%%*'):format(d.sign_hl_group, d.sign_text:gsub('%%', '%%%%'))
+            end
+        end
+    end
+    return '  '
 end
 
 -- False once the buffer was unloaded; writes are then dropped.
@@ -178,6 +226,13 @@ function View:decorate()
         priority = 200,
         strict = false,
     })
+    if self.signs then
+        self:mark('sign', row, 0, {
+            end_row = api.nvim_buf_line_count(self.buf) - 1,
+            sign_text = self.signs.user,
+            sign_hl_group = 'BoomerUserSign',
+        })
+    end
     local lines = {}
     for _, text in ipairs(self.queued) do
         local first = text:match('^[^\n]*')
@@ -302,6 +357,22 @@ function View:uncommit(text)
     self.submit = true
 end
 
+-- Show the role's sign on the rows from `row` to the end of the output,
+-- except a trailing empty row; `id` is the extmark to move, if any.
+function View:sign(role, row, id)
+    local end_row, end_col = self:output_end()
+    if end_col == 0 and end_row > row then
+        end_row = end_row - 1
+    end
+    local user = role == 'user'
+    return api.nvim_buf_set_extmark(self.buf, sign_ns, row, 0, {
+        id = id,
+        end_row = end_row,
+        sign_text = user and self.signs.user or self.signs.agent,
+        sign_hl_group = user and 'BoomerUserSign' or 'BoomerAssistantSign',
+    })
+end
+
 -- Stream text into the current message, starting a new labelled block when
 -- the role ('user' or 'agent') or message ID changes. User text follows the
 -- prompt on the label's line, as in a submitted draft.
@@ -316,11 +387,18 @@ function View:message(role, text, id)
         local _, _, row = self:append(self:gap() .. head)
         -- The user label is on the last row appended, the agent's above it.
         local group = role == 'user' and 'BoomerUserLabel' or 'BoomerAssistantLabel'
-        label(self.buf, role == 'user' and row or row - 1, #name, group)
-        self.current = { role = role, id = id }
+        local start = role == 'user' and row or row - 1
+        label(self.buf, start, #name, group)
+        m = { role = role, id = id }
+        m.sign = self.signs and self:sign(role, start)
+        self.current = m
     end
     if text ~= '' then
         self:append(text)
+        if m.sign then
+            local start = api.nvim_buf_get_extmark_by_id(self.buf, sign_ns, m.sign, {})[1]
+            self:sign(role, start, m.sign)
+        end
     end
 end
 
@@ -392,7 +470,7 @@ function View:open()
         local row, col = self:row()
         api.nvim_win_set_cursor(0, { row + 1, col })
     end
-    vim.wo[0][0].conceallevel = 0
+    self:set_window_options()
 end
 
 return View
