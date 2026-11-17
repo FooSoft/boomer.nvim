@@ -2037,6 +2037,13 @@ test('prompt queue', function()
     assert(draft(buf) == '' and state(buf).queued == 2, draft(buf))
     assert(virtual(buf) == 'Queued: q1\nQueued: /review x', virtual(buf))
     assert(winbar(buf):find('| running | 2 queued', 1, true), winbar(buf))
+    -- The live prompt is grayed out while the turn runs.
+    local function prompt_hl(field, group)
+        return marks(buf, api.nvim_buf_get_mark(buf, ':')[1] - 1, field, group)
+    end
+    assert(prompt_hl('hl_group', 'BoomerPromptBusy'), 'prompt label not busy')
+    assert(prompt_hl('sign_hl_group', 'BoomerPromptBusy'), 'prompt sign not busy')
+    assert(not prompt_hl('hl_group', 'BoomerUserLabel'))
     assert(not has(buf, 'q1'), 'queued prompt shown before it was sent')
     type_draft(buf, 'q3')
     keys('A<C-j><Esc>')
@@ -2056,6 +2063,8 @@ test('prompt queue', function()
         text(buf)
     )
     assert(state(buf).queued == nil and virtual(buf) == '', virtual(buf))
+    assert(prompt_hl('hl_group', 'BoomerUserLabel'), 'prompt label still busy')
+    assert(prompt_hl('sign_hl_group', 'BoomerUserSign'), 'prompt sign still busy')
     finish()
 
     -- CTRL-C returns the queue to the draft, before the typed text; a prompt

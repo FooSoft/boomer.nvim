@@ -48,7 +48,9 @@ cancels the active turn.
 
                                                         *boomer-queue*
 A prompt sent while a turn runs, or while the chat starts or loads a session,
-is queued. Queued prompts are shown as `Queued:` lines above the prompt
+is queued; meanwhile the prompt's label and sign are grayed out
+(`BoomerPromptBusy`, |boomer-highlights|). Queued prompts are shown as
+`Queued:` lines above the prompt
 (below it while the transcript is empty) and are sent one per turn, in order,
 each once the previous turn ends; only then do they enter the transcript.
 Plain prompts, agent commands and user `prompt` commands
@@ -495,6 +497,9 @@ Groups are defined with `default = true`; override them with
   BoomerWarning         Warnings. Links to `DiagnosticWarn`.
   BoomerQueued          `Queued:` lines of queued prompts. Links to
                         `Comment`.
+  BoomerPromptBusy      The live prompt's label and sign while the chat
+                        starts, loads a session or runs a turn (a prompt
+                        sent then is queued). Links to `BoomerQueued`.
   BoomerWinbar          Winbar text. Links to |hl-WinBar|.
   BoomerWinbarTitle     The `Boomer` title in the winbar. Links to
                         |hl-Title|.

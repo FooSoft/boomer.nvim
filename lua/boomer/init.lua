@@ -92,6 +92,7 @@ local function update(c, fields)
             c.state[k] = v
         end
     end
+    c.view:set_busy(status_mod.busy(c.state.state))
     status_mod.changed(c)
 end
 

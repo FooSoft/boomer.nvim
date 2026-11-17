@@ -28,6 +28,7 @@ local prompt_ns = api.nvim_create_namespace('boomer.prompt')
 --- set initially and after a committed draft, cleared by appending.
 ---@field marks table<string, integer> Extmark IDs of the live prompt's decorations.
 ---@field queued string[] Queued prompts, shown as virtual lines (View:set_queued).
+---@field busy? boolean The agent is busy: the live prompt is grayed out (View:set_busy).
 local View = {}
 View.__index = View
 
@@ -49,6 +50,7 @@ local function highlights()
         BoomerError = 'DiagnosticError',
         BoomerWarning = 'DiagnosticWarn',
         BoomerQueued = 'Comment',
+        BoomerPromptBusy = 'BoomerQueued',
         BoomerWinbar = 'WinBar',
         BoomerWinbarTitle = 'Title',
         BoomerWinbarBusy = 'DiagnosticWarn',
@@ -201,6 +203,17 @@ function View:set_queued(list)
     end
 end
 
+-- Gray out the live prompt's label and sign while the agent is busy.
+function View:set_busy(busy)
+    if self.busy == busy then
+        return
+    end
+    self.busy = busy
+    if self:valid() then
+        self:decorate()
+    end
+end
+
 -- Set or move (or, without opts, delete) the live prompt's decoration `key`.
 function View:mark(key, row, col, opts)
     if opts then
@@ -222,7 +235,7 @@ function View:decorate()
     local row = self:row()
     self:mark('label', row, 0, {
         end_col = #self:name('user'),
-        hl_group = 'BoomerUserLabel',
+        hl_group = self.busy and 'BoomerPromptBusy' or 'BoomerUserLabel',
         priority = 200,
         strict = false,
     })
@@ -230,7 +243,7 @@ function View:decorate()
         self:mark('sign', row, 0, {
             end_row = api.nvim_buf_line_count(self.buf) - 1,
             sign_text = self.signs.user,
-            sign_hl_group = 'BoomerUserSign',
+            sign_hl_group = self.busy and 'BoomerPromptBusy' or 'BoomerUserSign',
         })
     end
     local lines = {}

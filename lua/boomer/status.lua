@@ -35,6 +35,11 @@ local M = {}
 local busy = { starting = true, loading = true, running = true, cancelling = true }
 local bad = { ['no session'] = true, exited = true }
 
+-- Whether a chat in `state` is busy: a prompt sent now would be queued.
+function M.busy(state)
+    return busy[state] == true
+end
+
 local function context(ctx)
     if not ctx or type(ctx.used) ~= 'number' then
         return nil
