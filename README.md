@@ -1,111 +1,224 @@
-# boomer.nvim
+# Boomer
 
-A minimal Neovim chat buffer for **Codex** (App Server protocol), **GitHub
-Copilot CLI** and other **ACP** agents. Requires Neovim 0.12+ and an installed,
-authenticated agent.
+Boomer is a Neovim chat buffer for coding agents. It talks to Codex through its App Server protocol, and to GitHub Copilot CLI, Gemini CLI, Claude Agent and other agents through the [Agent Client Protocol](https://agentclientprotocol.com) (ACP). The chat is a native prompt buffer: replies stream in above the prompt while you type the next one.
 
-```sh
-nvim --cmd 'set runtimepath+=/path/to/boomer.nvim' -c Boomer
-```
+Boomer requires Neovim 0.12 or newer and an installed, authenticated agent. It has no dependencies and loads lazily. Agents run with your environment, configuration and credentials, and enforce their own sandbox; Boomer never adds auto-approval flags. Full documentation is available via `:help boomer`.
 
-`:Boomer` opens a vertical split (or any side, or a float) with a native prompt
-buffer, in Insert mode. Type after `Prompt: ` and press **Enter** to send;
-**Shift-Enter** adds a line. Replies stream above the
-prompt while you type. Enter during a turn queues the prompt; queued prompts are
-sent one per turn. Setting commands (`/model`, `/permissions`, ...) and `/compact`
-typed during a turn are queued too and run between turns, in order. **Ctrl-C**
-cancels the active turn and returns queued prompts and commands to the draft;
-`/cancel` cancels it and discards them.
-Full documentation: `:help boomer`.
+Features include:
 
-Commands work as `:Boomer {command}` (with completion) or typed in the prompt as
-`/command` (with `<C-x><C-o>` or `<C-n>` completion; `//text` sends a literal `/text`):
-
-| Command | Action |
-| --- | --- |
-| `:Boomer` | Open or focus the chat |
-| `/model [id]`, `/effort [level]` | Pick or set the model / reasoning effort |
-| `/mode [mode]` | Pick or set the mode, e.g. `/mode plan` (Codex), `/mode agent` (leaves Copilot's plan mode) |
-| `/settings [id [value]]` | Pick or set any session setting the agent offers |
-| `/permissions [preset]` | Read Only / Default / Full Access (Codex); default / assisted / allow-all (Copilot) |
-| `/resume [id]`, `/new` | Load a saved session / start a new one |
-| `/agent [name]` | Switch to another agent profile |
-| `/compact [focus]` | Compact the conversation |
-| `/usage` | Context, token and cost usage; Codex 5h and weekly limits |
-| `/help` | List commands, including user and agent commands |
-| `/cancel` | Cancel the turn and clear the queue |
-| `:Boomer close` | Stop the agent |
-
-Each command writes its result into the chat, such as `[Setting: model = GPT-5]`,
-`[Session: new]` or `[Agent: copilot]`; commands run with `:Boomer` show their
-`/command` line first, as if typed. Commands without an argument (`/new`, `/usage`,
-...) refuse one.
-
-Slash commands advertised by ACP agents (such as Copilot's `/plan`) are sent to
-the agent; unknown ones are not sent.
-
-Errors and warnings (such as a command that cannot run now) are written into the
-transcript; while the chat is hidden they are also shown with `vim.notify`.
-
-The chat window's winbar shows a highlighted `Boomer` title on the left and the
-agent, model, mode, state, context use and (for Codex) 5h/weekly rate limits
-aligned to the right, e.g.
-`codex | gpt-5 (high) | ready | ctx 42% | 5h 7% | wk 33%`. For statusline
-plugins use `require('boomer').statusline()` or `.status()`; `User BoomerStatus`
-and `User BoomerTurnDone` autocommands report changes. In the chat, `<S-Tab>` picks the mode
-(e.g. to leave Copilot's plan mode). No global keymaps are set;
-map commands directly, e.g. `vim.keymap.set('n', '<Leader>a', '<Cmd>Boomer<CR>')`.
-Run `:checkhealth boomer` to check agents.
+*   Chatting with Codex or any ACP agent in a split or floating window.
+*   Queuing prompts and setting changes while a turn is running.
+*   Changing the model, reasoning effort, mode and permissions from the chat.
+*   Resuming saved sessions and switching agents in the same window.
+*   Defining your own slash commands and prompt templates.
+*   Showing context, token, cost and rate limit usage in the winbar or statusline.
 
 ## Configuration
 
-Optional; applies to the next chat. See `:help boomer-config`.
+The plugin is configured via the optional `setup` function. Options may be provided to change the default settings shown below; they apply to the next chat.
 
 ```lua
 require('boomer').setup({
-    agent = 'codex', -- default profile
-    agents = { -- merged with the built-in profiles (see below)
-        copilot = { model = 'claude-sonnet-4.5', effort = 'high', mode = 'plan' },
-        myagent = { protocol = 'acp', command = 'my-agent', args = { 'acp' } },
-    },
-    commands = { -- user slash commands; `false` disables a built-in
-        review = { desc = 'Review the diff', prompt = 'Review `git diff`. $ARGUMENTS' },
-    },
-    winbar = true, -- or false, or function(status) -> winbar string
-    window = { -- 'right', 'left', 'top', 'bottom' or 'float'; sizes < 1 are fractions
-        position = 'right', width = 0.5, height = 0.5,
-        float = {}, -- extra nvim_open_win() config, e.g. { border = 'rounded' }
-    },
+    agent = 'codex',
+    agents = {},
+    commands = {},
+    winbar = true,
+    window = { position = 'right', width = 0.5, height = 0.5, float = {} },
     labels = { prompt = 'Prompt:', agent = 'Agent:' },
 })
 ```
 
-A profile has `protocol` (`'codex'` or `'acp'`), `command`, `args`, `env`, a
-message `label` (overrides `labels.agent`), and defaults for new sessions:
-`model`, `effort`, `mode` and ACP `options`.
+#### `agent`
 
-Built-in profiles: `codex` (`codex app-server`) and the ACP agents `copilot`,
-`auggie`, `claude` (`claude-agent-acp`), `cline`, `cursor` (`cursor-agent`),
-`gemini`, `goose`, `kimi`, `kiro` (`kiro-cli`), `opencode`, `qwen` and `vibe`
-(`vibe-acp`); see `:help boomer-agents`. `/agent` offers the installed ones.
-The agent runs in Neovim's working directory.
+Specifies which agent profile is started by `:Boomer`. See [Agents](#agents) for the built-in profiles.
 
-The agent runs with your environment, configuration and credentials, and enforces
-its own sandbox. Boomer never adds auto-approval flags.
+#### `agents`
 
-## Development
+Specifies agent profiles, merged field by field with the built-in ones. Fields given here replace built-in fields of the same name (`args` is replaced, not appended).
 
-```sh
-make test                                     # fake agents; no login or network
-make test FILTER=sessions                     # tests whose name contains "sessions"
-make test-real BACKEND=codex                  # initialize a real CLI, no inference
-make test-real BACKEND=copilot REAL_ARGS=--allow-inference   # uses quota
+```lua
+agents = {
+    copilot = { model = 'claude-sonnet-4.5', effort = 'high', mode = 'plan' },
+    myagent = { protocol = 'acp', command = 'my-agent', args = { 'acp' } },
+},
 ```
 
-Set `NVIM_BIN` to test with another Neovim. Without `make` (on Windows, say), run
-`nvim --clean --headless -l tests/run.lua [filter]`. Fake agents are described in
-[tests/scenarios/README.md](tests/scenarios/README.md).
+A profile supports the following fields:
 
-## License
+*   `protocol`: `'codex'` or `'acp'` (required for new profiles)
+*   `command`: executable to run (required for new profiles)
+*   `args`: list of arguments; Codex always runs `{command} app-server --listen stdio://` followed by `args`
+*   `env`: environment variables added to Neovim's environment
+*   `model`: model for new sessions (ID or name)
+*   `effort`: reasoning effort for new sessions
+*   `mode`: mode for new sessions, such as `plan`
+*   `options`: table of ACP session config option IDs to values, applied to new sessions
+*   `label`: label of the agent's messages, overriding `labels.agent`
 
-MIT
+#### `commands`
+
+Specifies user slash commands. Mapping a name to `false` disables the built-in command of that name; user commands also override agent commands. A command has a `desc`, an optional `complete` list (or a function returning one), and exactly one of the following:
+
+*   `prompt`: text sent as a prompt, where `$ARGUMENTS` is replaced by the arguments (appended after a blank line otherwise); may also be a `function(args, ctx)` returning the text
+*   `run`: a `function(args, ctx)` run in Neovim
+
+```lua
+commands = {
+    review = { desc = 'Review the diff', prompt = 'Review `git diff`. $ARGUMENTS' },
+    usage = false, -- let the agent handle /usage
+},
+```
+
+#### `winbar`
+
+Specifies if the chat window's winbar shows the [status](#status). A `function(status)` returning a winbar string may be provided instead.
+
+#### `window`
+
+Specifies how the chat window opens.
+
+*   `position`: `'right'`, `'left'`, `'top'`, `'bottom'` or `'float'`
+*   `width`: width of `left`, `right` and `float` windows
+*   `height`: height of `top`, `bottom` and `float` windows
+*   `float`: extra `nvim_open_win()` config for floats, such as `border` or `title`
+
+Sizes below 1 are fractions of the editor, otherwise a number of cells.
+
+```lua
+window = { position = 'float', width = 0.8, height = 0.8, float = { border = 'rounded' } },
+```
+
+#### `labels`
+
+Specifies the labels of user and agent messages. The prompt is the user label followed by a space; a profile's `label` overrides `agent`.
+
+## Agents
+
+Each agent profile names a protocol and the process that speaks it. Built-in profiles expect their executable on `$PATH`, and the agent runs in Neovim's working directory. The `/agent` picker offers the installed ones; run `:checkhealth boomer` to check them.
+
+| Profile    | Command                       | Agent                      |
+| -          | -                             | -                          |
+| `codex`    | `codex app-server`            | Codex                      |
+| `copilot`  | `copilot --acp --stdio`       | GitHub Copilot CLI         |
+| `auggie`   | `auggie --acp`                | Augment Auggie CLI         |
+| `claude`   | `claude-agent-acp`            | Claude Agent (Claude Code) |
+| `cline`    | `cline --acp`                 | Cline                      |
+| `cursor`   | `cursor-agent acp`            | Cursor                     |
+| `gemini`   | `gemini --acp`                | Gemini CLI                 |
+| `goose`    | `goose acp`                   | goose                      |
+| `kimi`     | `kimi acp`                    | Kimi CLI                   |
+| `kiro`     | `kiro-cli acp`                | Kiro CLI                   |
+| `opencode` | `opencode acp`                | OpenCode                   |
+| `qwen`     | `qwen --acp`                  | Qwen Code                  |
+| `vibe`     | `vibe-acp`                    | Mistral Vibe               |
+
+## Commands
+
+Commands are not mapped by default; an example set of bindings is shown below:
+
+```lua
+vim.keymap.set('n', '<Leader>aa', '<Cmd>Boomer<CR>')
+vim.keymap.set('n', '<Leader>am', '<Cmd>Boomer model<CR>')
+vim.keymap.set('n', '<Leader>ac', '<Cmd>Boomer cancel<CR>')
+```
+
+Each command below can be run as `:Boomer {command}` with command-line completion, or typed in the prompt as `/command` with <kbd>Ctrl-X</kbd> <kbd>Ctrl-O</kbd> or <kbd>Ctrl-N</kbd> completion; start the draft with `//` to send a literal `/text`. Commands that take an argument open a picker without one, and commands without an argument refuse one. Each command writes its result into the chat, such as `[Setting: model = GPT-5]`, `[Session: new]` or `[Agent: copilot]`.
+
+Slash commands advertised by ACP agents (such as Copilot's `/plan`) are sent to the agent; unknown ones are not sent.
+
+#### `Boomer`
+
+Opens or focuses the chat, starting the default agent.
+
+#### `/model [id]`
+
+Sets the session's model by ID or name.
+
+#### `/effort [level]`
+
+Sets the reasoning effort.
+
+#### `/mode [mode]`
+
+Sets the session mode, such as `plan` for Codex. Copilot's `/plan` enters plan mode, and only `/mode agent` leaves it.
+
+#### `/settings [id [value]]`
+
+Sets any session setting the agent offers.
+
+#### `/permissions [preset]`
+
+Chooses what the agent may do without asking: Read Only, Default or Full Access for Codex; `default`, `assisted` or `allow-all` for Copilot.
+
+#### `/resume [id]`
+
+Loads a saved session for the working directory.
+
+#### `/new`
+
+Starts a new session with the same agent.
+
+#### `/agent [name]`
+
+Stops the current agent and starts another profile in the same window.
+
+#### `/compact [focus]`
+
+Summarizes the conversation to free context.
+
+#### `/usage`
+
+Writes context, token and cost usage into the chat; Codex also shows its 5-hour and weekly rate limits.
+
+#### `/help`
+
+Lists the available commands, including user and agent commands.
+
+#### `/cancel`
+
+Cancels the active turn and discards queued prompts and commands.
+
+#### `Boomer close`
+
+Stops the agent and wipes the chat buffer.
+
+## Chat
+
+The chat opens in Insert mode with the cursor after `Prompt: `. The following keys are mapped in the chat buffer only:
+
+| Key                    | Action                                                          |
+| -                      | -                                                               |
+| <kbd>Enter</kbd>       | Sends the draft or runs the command; queues it during a turn    |
+| <kbd>Shift-Enter</kbd> | Adds a line to the draft                                        |
+| <kbd>Ctrl-C</kbd>      | Cancels the active turn and returns queued prompts to the draft |
+| <kbd>Shift-Tab</kbd>   | Picks the session mode                                          |
+
+Queued prompts are sent one per turn, in order. Setting commands (`/model`, `/permissions`, ...) and `/compact` typed during a turn are queued too and run between turns. Errors and warnings are written into the transcript, and are also shown with `vim.notify` while the chat is hidden.
+
+## Status
+
+The chat window's winbar shows a `Boomer` title on the left and the agent, model, mode, state, context use and (for Codex) 5-hour and weekly rate limits on the right:
+
+```
+codex | gpt-5 (high) | ready | ctx 42% | 5h 7% | wk 33%
+```
+
+Statusline plugins can use `require('boomer').statusline()` or `require('boomer').status()`. The `User BoomerStatus` and `User BoomerTurnDone` autocommands report changes.
+
+## Tests
+
+Run the regression suite from the repository root with Neovim. Fake agents are used, so no login or network is needed:
+
+```sh
+make test                   # all tests
+make test FILTER=sessions   # tests whose name contains "sessions"
+```
+
+Without `make` (on Windows, say), run `nvim --clean --headless -l tests/run.lua [filter]`. Set `NVIM_BIN` to test another Neovim. The fake agents are described in [tests/scenarios/README.md](tests/scenarios/README.md).
+
+Opt-in tests run a real, authenticated agent:
+
+```sh
+make test-real BACKEND=codex                                 # no inference
+make test-real BACKEND=copilot REAL_ARGS=--allow-inference   # uses quota
+```
