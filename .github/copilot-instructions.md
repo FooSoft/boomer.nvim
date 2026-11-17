@@ -35,7 +35,8 @@ keep guards and callbacks expanded across lines rather than one-liners).
   `boomer.Client`. `config.protocols` maps a profile's `protocol` to its adapter
   module. Their semantics differ:
   - Codex: a session is a thread; model/effort/mode/permissions are *staged
-    locally* and sent with the next `turn/start`.
+    locally* and sent with the next `turn/start`. Models are listed once at
+    startup (`model/list`), so settings are always available synchronously.
   - ACP: a prompt is one long-lived `session/prompt` request with
     `session/update` notifications streaming; settings are changed on the agent
     immediately. Updates arriving before `session/new` returns are buffered in
@@ -45,8 +46,8 @@ keep guards and callbacks expanded across lines rather than one-liners).
   (ACP requires it; Codex omits it). libuv callbacks are scheduled onto the main
   loop, so all handlers run on the main loop and need no locking.
 - `lua/boomer/util.lua` defines the backend-neutral `boomer.Setting` shape.
-  Adapters translate protocol-specific settings into it (`setting_list()`,
-  `settings()`, `configure()`), so `init.lua` can list/complete/change model,
+  Adapters translate protocol-specific settings into it (synchronous
+  `settings()`, async `configure()`), so `init.lua` can list/complete/change model,
   effort, mode and permissions without knowing the protocol. Categories use
   ACP's names (`effort` → `thought_level`).
 - `lua/boomer/view.lua`: the chat is a native `buftype=prompt` buffer.
@@ -56,15 +57,14 @@ keep guards and callbacks expanded across lines rather than one-liners).
 - `lua/boomer/commands.lua`: slash-command parsing, the `builtins` table, user
   prompt templates and completion. Each builtin's `gate` names a precondition
   checked by `blocked()` in `init.lua` (`none`, `session`, `idle`, `queue`,
-  `later`, `switch`, `agent`). A builtin `name` is executed by calling
+  `switch`). A builtin `name` is executed by calling
   `M[name]` in `init.lua`, so adding one means a `builtins` entry plus a
   matching `M.<name>` function.
-- The prompt queue (`c.prompts`, `boomer.Queued`) holds only text lines. A
-  `later` command (settings, `/compact`) first resolves its arguments in
-  `M.<name>`, picking what is missing, into a complete line such as
-  `/model gpt-5`; `dispatch()` runs it now or queues it, and `act()` runs it
-  through `exec[name](c, args, done)` (not `M[name]`, so it is never queued
-  again). `done(err)` lets the queue go on or returns it to the draft.
+- The prompt queue (`c.prompts`, `boomer.Queued`) holds only prompts
+  (`{ text, line }`) for the agent; Boomer's own commands are never queued,
+  they run at once or warn. Every command that runs echoes its resolved line
+  (`echo()`, such as `/model gpt-5` after a picker) before its result. `<CR>`
+  takes the draft itself; a draft that cannot be submitted goes back into it.
 - `lua/boomer/config.lua`: built-in agent profiles merged field-by-field with
   user profiles; options are validated eagerly in `setup()`.
 - `lua/boomer/status.lua`: the status table rendered for winbar/statusline/
@@ -110,5 +110,5 @@ keep guards and callbacks expanded across lines rather than one-liners).
   `await()`, and `finish()` — which closes the chat and asserts the fake played
   the **entire** scenario (exit 0). Tests often edit loaded scenarios inline
   rather than adding new JSON files.
-- `vim.notify`, `nvim_echo` and `vim.ui.select` are stubbed; `finish()` makes
+- `vim.notify` and `vim.ui.select` are stubbed; `finish()` makes
   any unexpected picker an error. Rpc kill timeouts are shortened for tests.

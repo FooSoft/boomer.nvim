@@ -123,7 +123,7 @@ function Acp:new_session(cwd, cb)
             return cb(err)
         end
         local todo = {}
-        local list = self:setting_list()
+        local list = self:settings()
         for key, category in pairs(util.categories) do
             local value = self.profile[key]
             if value then
@@ -271,16 +271,6 @@ function Acp:prompt(text, cb)
             if self.turn ~= turn then
                 return
             end
-            local usage = r and type(r.usage) == 'table' and r.usage
-            if usage then
-                self.on.status({
-                    tokens = {
-                        total = usage.totalTokens,
-                        input = usage.inputTokens,
-                        output = usage.outputTokens,
-                    },
-                })
-            end
             local reason = r and r.stopReason
             self:finish(err, (reason == nil or reason == 'end_turn') and 'completed' or reason)
         end,
@@ -395,7 +385,7 @@ local legacy = {
 -- The session's settings. Legacy session modes and models appear when no
 -- config option has their category.
 ---@return boomer.Setting[]
-function Acp:setting_list()
+function Acp:settings()
     local list = {}
     for _, o in ipairs(self.options or {}) do
         local choices = o.type == 'boolean'
@@ -435,15 +425,10 @@ function Acp:setting_list()
     return list
 end
 
--- Everything is known locally; answers immediately.
-function Acp:settings(cb)
-    cb(nil, self:setting_list())
-end
-
 -- Report title, model, effort and mode labels to the chat.
 function Acp:report()
     local fields = { title = self.title or vim.NIL }
-    local list = self:setting_list()
+    local list = self:settings()
     for key, category in pairs(util.categories) do
         local setting = util.find(list, category)
         fields[key] = setting and util.current_label(setting) or vim.NIL
@@ -451,8 +436,10 @@ function Acp:report()
     self.on.status(fields)
 end
 
--- Change a setting on the agent; cb(err) when it answered.
+-- Change a setting on the agent; cb(err) when it answered. A reply for a
+-- session that was replaced meanwhile changes nothing.
 function Acp:configure(id, value, cb)
+    local session = self.session
     for _, l in ipairs(legacy) do
         if id == l.id then
             self.rpc:request(
@@ -460,7 +447,7 @@ function Acp:configure(id, value, cb)
                 { sessionId = self.session, [l.param] = value },
                 function(err)
                     local state = self[l.field]
-                    if not err and state then
+                    if not err and state and self.session == session then
                         state[l.current] = value
                         self:report()
                     end
@@ -474,7 +461,7 @@ function Acp:configure(id, value, cb)
         'session/set_config_option',
         { sessionId = self.session, configId = id, value = value },
         function(err, r)
-            if not err and r.configOptions then
+            if not err and r.configOptions and self.session == session then
                 self.options = r.configOptions
                 self:report()
             end

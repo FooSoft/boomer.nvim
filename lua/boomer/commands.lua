@@ -7,50 +7,32 @@
 local M = {}
 
 -- `gate` names the precondition checked before the command runs (see
--- blocked() in init.lua); `complete` the kind of argument it completes.
--- `ex` commands are only available as `:Boomer {name}`, not from the prompt.
--- `defer` commands run the agent's command of the same name if it has one,
--- and then show and complete its hint.
+-- blocked() in init.lua).
 M.builtins = {
-    model = { desc = 'Choose the model', hint = '[model]', gate = 'later', complete = 'model' },
-    effort = {
-        desc = 'Choose the reasoning effort',
-        hint = '[level]',
-        gate = 'later',
-        complete = 'effort',
-    },
+    model = { desc = 'Choose the model', hint = '[model]', gate = 'session' },
+    effort = { desc = 'Choose the reasoning effort', hint = '[level]', gate = 'session' },
     mode = {
         desc = 'Choose the session mode (such as Agent or Plan)',
         hint = '[mode]',
-        gate = 'later',
-        complete = 'mode',
+        gate = 'session',
     },
-    resume = { desc = 'Load a saved session', hint = '[id]', gate = 'switch', complete = 'session' },
-    new = { desc = 'Start a new session', gate = 'switch' },
-    usage = { desc = 'Show context, token and cost usage', gate = 'session' },
-    settings = { desc = 'Change any session setting', hint = '[id [value]]', gate = 'later' },
     permissions = {
         desc = 'Choose what the agent may do without asking',
         hint = '[preset]',
-        gate = 'later',
-        complete = 'permissions',
-        defer = true,
+        gate = 'session',
     },
     compact = {
         desc = 'Summarize the conversation to free context',
         hint = '[focus]',
-        gate = 'later',
-        defer = true,
+        gate = 'session',
     },
-    agent = {
-        desc = 'Switch to another agent',
-        hint = '[name]',
-        gate = 'agent',
-        complete = 'agent',
-    },
+    usage = { desc = 'Show context, token and cost usage', gate = 'session' },
+    resume = { desc = 'Load a saved session', hint = '[id]', gate = 'switch' },
+    new = { desc = 'Start a new session', gate = 'switch' },
+    agent = { desc = 'Switch to another agent', hint = '[name]', gate = 'switch' },
     help = { desc = 'List commands', gate = 'none' },
-    cancel = { desc = 'Cancel the active turn and clear the queue', gate = 'none' },
-    close = { desc = 'Stop the agent and wipe the chat', gate = 'none', ex = true },
+    cancel = { desc = 'Cancel the active turn; queued prompts return to the draft', gate = 'none' },
+    close = { desc = 'Stop the agent and wipe the chat', gate = 'none' },
 }
 
 -- nil for plain text; { text = ... } for `//text` (sent as `/text`);
@@ -85,11 +67,8 @@ function M.hint_values(hint)
     return out
 end
 
--- Expand a user `prompt`: a string with $ARGUMENTS or a function(args, ctx).
-function M.expand(spec, args, ctx)
-    if type(spec.prompt) == 'function' then
-        return spec.prompt(args, ctx)
-    end
+-- Expand a user `prompt`, replacing $ARGUMENTS.
+function M.expand(spec, args)
     local text, n = spec.prompt:gsub('%$ARGUMENTS', function()
         return args
     end)
@@ -100,13 +79,11 @@ function M.expand(spec, args, ctx)
 end
 
 -- Every command visible to a chat: { name, desc, hint, source, spec }, sorted
--- by name within builtin, user and agent groups. `typed` (the prompt, not
--- :Boomer) hides Ex-only commands.
+-- by name within builtin, user and agent groups.
 ---@param user table<string, table|false> config `commands`
 ---@param agent table<string, table> Commands the agent advertised, by name.
----@param typed boolean
 ---@return { name: string, desc: string?, hint: string?, source: 'builtin'|'user'|'agent', spec: table }[]
-function M.list(user, agent, typed)
+function M.list(user, agent)
     local out, seen = {}, {}
     local function add(name, desc, hint, source, spec)
         if not seen[name] then
@@ -126,9 +103,8 @@ function M.list(user, agent, typed)
     end
     for _, name in ipairs(sorted(M.builtins)) do
         local b = M.builtins[name]
-        if user[name] == nil and not (typed and b.ex) then
-            local hint = b.defer and agent[name] and agent[name].hint or b.hint
-            add(name, b.desc, hint, 'builtin', b)
+        if user[name] == nil then
+            add(name, b.desc, b.hint, 'builtin', b)
         end
     end
     for _, name in ipairs(sorted(agent)) do
@@ -145,8 +121,8 @@ function M.list(user, agent, typed)
 end
 
 -- The command named `name` as list() describes it, or nil.
-function M.find(user, agent, name, typed)
-    for _, item in ipairs(M.list(user, agent, typed)) do
+function M.find(user, agent, name)
+    for _, item in ipairs(M.list(user, agent)) do
         if item.name == name then
             return item
         end

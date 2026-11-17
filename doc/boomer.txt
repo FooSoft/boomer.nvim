@@ -41,30 +41,22 @@ enforces its own sandbox. Boomer never adds auto-approval flags.
 `Prompt: ` and press <CR> to send; <S-CR> adds a line. The sent text stays in
 the transcript as typed, after its `Prompt:` label, and replies stream above
 the prompt, under `Agent:` labels, while you type. A picker opened from the
-prompt, such as for `/settings`, returns to Insert mode when it closes. <CR>
-keeps the draft if it is empty, or if a command cannot run now. CTRL-C
-(Insert or Normal mode) cancels the active turn.
+prompt, such as for `/model`, returns to Insert mode when it closes. A draft
+that cannot be sent or run now (empty, or a command that cannot run yet)
+stays in the prompt, and a warning says why. CTRL-C (Insert or Normal mode)
+cancels the active turn.
 
                                                         *boomer-queue*
-<CR> while a turn runs, or while the chat starts or loads a session, queues
-the draft instead of sending it. Queued prompts are shown as `Queued:` lines
-above the prompt (below it while the transcript is empty) and are sent one
-per turn, in order, each once the previous turn ends; only then do they enter
-the transcript. Plain prompts, agent commands and user `prompt` commands
-(|boomer-user-commands|, expanded when queued) can be queued, and so can
-`/model`, `/effort`, `/mode`, `/settings`, `/permissions` and `/compact`
-(also from |:Boomer| or <S-Tab>): they run between turns, in order with the
-prompts, so a setting applies from the next queued prompt on. Their pickers
-open right away; only the choice is queued, as the command that selects it
-(`/model gpt-5`, `/settings {id} {value}`). Such a command given by |:Boomer|
-or <S-Tab> is shown as the user's message when it runs (see
-|boomer-command-results|).
-`/new`, `/resume` and `/agent` cannot be queued. A draft
-committed with CTRL-J during a turn is queued too and marked `[queued]`.
-CTRL-C cancels the turn and puts the queued prompts and commands back into
-the draft, before the text being typed; |boomer-/cancel| cancels it and
-discards them. Those queued after that run once the cancelled turn ends. A failed turn or queued command,
-an agent exit or a session that fails to load also returns them to the draft.
+A prompt sent while a turn runs, or while the chat starts or loads a session,
+is queued. Queued prompts are shown as `Queued:` lines above the prompt
+(below it while the transcript is empty) and are sent one per turn, in order,
+each once the previous turn ends; only then do they enter the transcript.
+Plain prompts, agent commands and user `prompt` commands
+(|boomer-user-commands|) are queued. Boomer's own commands are never queued:
+they run at once, or warn if they cannot run now. CTRL-C and |boomer-/cancel|
+cancel the turn and put the queued prompts back into the draft, before the
+text being typed. A failed turn, an agent exit or a session that fails to
+load also returns them to the draft.
 
 - One chat per Neovim instance. Hiding the window keeps it; |:bdelete| or
   `:Boomer close` ends it. History is read-only; only the draft is sent.
@@ -118,23 +110,21 @@ their arguments. The chat buffer's 'complete' option starts with `o`, so
     })
 <
 
-Values the agent only gives on request (Codex models and efforts, saved
-sessions) are fetched once in the background the first time they are
-completed; the menu or command line then shows them.
+Saved sessions are not completed; `/resume` without an ID picks one.
 
-Commands that take an argument open a |vim.ui.select()| picker without one.
-Commands shown without an argument below (`/new`, `/usage`, `/help`,
-`/cancel`, `close`) warn if given one, and keep a typed draft.
+Commands that take an argument open a |vim.ui.select()| picker without one;
+dismissing the picker does nothing (but see |boomer-/resume|). Commands
+shown without an argument below (`/new`, `/usage`, `/help`, `/cancel`,
+`/close`) warn if given one, and keep a typed draft.
 
                                                 *boomer-command-results*
-A command that runs writes its result into the chat, after its line. A
-command given by |:Boomer|, <S-Tab> or the |boomer-api| has its line shown as
-the user's message first, as if typed. A command that cannot run only warns.
-Results are system lines such as:
+A command that runs is shown as the user's message, as typed and with the
+argument it resolved to (`/model gpt-5` after a picker), however it was given:
+typed, from |:Boomer|, <S-Tab> or the |boomer-api|. Its result follows. A
+command that cannot run only warns. Results are system lines such as:
 
     `[Setting: model = GPT-5]`      a setting changed; named by its command
                                   (`model`, `effort`, `mode`, `permissions`)
-                                  or by its label (|boomer-/settings|)
     `[Session: new]`                |boomer-/new|
     `[Session: {title}]`            |boomer-/resume|: the session's title, or
                                   its ID
@@ -148,6 +138,10 @@ line is not shown. Plain |:Boomer| writes no result.
 
 /model [{model}]                                        *boomer-/model*
         Set the session's model. {model} matches a model ID or its name.
+        Settings change at once, also during a turn; Codex applies them from
+        its next turn. Codex lists its models when it starts. If the agent
+        offers no such setting but has its own command of the same name, the
+        line is sent to it.
 
 /effort [{level}]                                       *boomer-/effort*
         Set the reasoning effort.
@@ -159,10 +153,7 @@ line is not shown. Plain |:Boomer| writes no result.
         leave it by itself. Codex offers `default` and `plan` (its
         experimental collaboration modes); like the model, the mode applies
         from the next turn. In plan mode Codex asks its questions as text.
-
-/settings [{id} [{value}]]                              *boomer-/settings*
-        Pick any setting the agent offers for this session, or name it by
-        its ID and pick or give its value: `/settings verbose true`.
+        <S-Tab> in the chat switches to the next mode.
 
 /permissions [{preset}]                                 *boomer-/permissions*
         Choose what the agent may do without asking. Codex offers the
@@ -177,15 +168,17 @@ line is not shown. Plain |:Boomer| writes no result.
         The preset applies to the next turn and later ones in this session;
         a new or loaded session starts with the agent's configured policy.
         If an ACP agent advertises its own `/permissions`, the line is sent
-        to it, and the choices in its hint complete the argument; without
-        one, a picker offers them. Copilot offers `default`, `assisted`,
-        `allow-all` (approve every tool, path and URL request for this
-        session) and `show`. Otherwise the command is not available.
+        to it, and the choices in its hint complete the argument. Copilot
+        offers `default`, `assisted`, `allow-all` (approve every tool, path
+        and URL request for this session) and `show`. Otherwise the command
+        is not available.
 
 /resume [{id}]                                          *boomer-/resume*
         Load a saved session for the working directory. Without a chat, this
-        starts the default agent first. Choosing the open session keeps it
-        and writes `[Session: {title} (current)]`.
+        starts the default agent first; then dismissing the picker, or
+        having no saved sessions, starts a new session. Choosing the open
+        session keeps it and writes `[Session: {title} (current)]`. Like
+        `/new` and `/agent`, it carries the draft over to the new buffer.
 
 /new                                                    *boomer-/new*
         Start a new session with the same agent.
@@ -196,9 +189,10 @@ line is not shown. Plain |:Boomer| writes no result.
         it and writes `[Agent: {name} (current)]`. See |boomer-agents|.
 
 /compact [{focus}]                                      *boomer-/compact*
-        Summarize the conversation to free context. If the agent advertises
-        its own `/compact`, the line is sent to it, with {focus}. Otherwise
-        Codex compacts the thread natively.
+        Summarize the conversation to free context. Codex compacts the
+        thread natively, between turns only, and takes no {focus}. ACP
+        agents that advertise their own `/compact` get the line, with
+        {focus}, as a prompt.
 
 /usage                                                  *boomer-/usage*
         Write context, token and cost usage into the chat. Works during a
@@ -209,18 +203,15 @@ line is not shown. Plain |:Boomer| writes no result.
         List the available commands, including user and agent commands.
 
 /cancel                                         *boomer-/cancel* *boomer-cancel*
-        Cancel the active turn and discard the queued prompts and commands
-        (|boomer-queue|), noting how many as `[cancelled N queued]`. Runs at
-        once, also during a turn. CTRL-C in the chat cancels too, but returns
-        the queue to the draft instead.
+        Cancel the active turn and put the queued prompts back into the
+        draft (|boomer-queue|), like CTRL-C in the chat.
 
-:Boomer close                                           *boomer-close*
-        Stop the agent and wipe the chat buffer (Ex only).
+/close                                          *boomer-/close* *boomer-close*
+        Stop the agent and wipe the chat buffer.
 
-Commands that change settings or compact the conversation are queued during
-a turn (|boomer-queue|), like agent and user `prompt` commands. `new`,
-`resume` and `agent` need an idle chat; run from |:Boomer|, they also need an
-empty draft.
+`/new`, `/resume` and `/agent` need an idle chat. If the agent has exited,
+they, like plain |:Boomer|, restart it in the same windows, keeping the
+draft.
 
                                                        *boomer-agent-commands*
 ACP agents advertise their own slash commands (for example Copilot's
@@ -282,13 +273,13 @@ command of that name. User commands override agent commands. A command has
 function(status) returning one) and exactly one of:
 
 - `prompt`: text sent as a prompt. `$ARGUMENTS` is replaced by the
-  arguments; without it, arguments are appended after a blank line. It can
-  also be a function(args, ctx) that returns the text.
-- `run`: function(args, ctx) run in Neovim.
+  arguments; without it, arguments are appended after a blank line.
+- `run`: function(args, ctx) run in Neovim. Its line is shown as the user's
+  message first.
 
 `ctx` has `args`, `buf` (chat buffer), `status` (|boomer.status()|),
-`send(text)` (send a prompt, shown in the chat) and `write(text)` (write a
-note into the chat). Example: >lua
+`send(text)` (send a prompt like the draft: queued during a turn) and
+`write(text)` (write a note into the chat). Example: >lua
 
     require('boomer').setup({
         commands = {
@@ -298,8 +289,8 @@ note into the chat). Example: >lua
             },
             alt = {
                 desc = 'Ask about the alternate file',
-                prompt = function(args)
-                    return ('About %s: %s'):format(vim.fn.bufname('#'), args)
+                run = function(args, ctx)
+                    ctx.send('About ' .. vim.fn.bufname('#') .. ': ' .. args)
                 end,
             },
             usage = false, -- let the agent handle /usage
@@ -397,7 +388,9 @@ without a chat:
   agent         Profile name.
   protocol      `'codex'` or `'acp'`.
   state         `starting`, `loading`, `ready`, `running`, `cancelling`,
-                `failed` or `closed`.
+                `no session` (none open, such as after a failed load; use
+                `/new` or `/resume`) or `exited` (the agent stopped;
+                |:Boomer| restarts it).
   queued        Number of queued prompts (|boomer-queue|), nil when none.
   session       Session ID.
   title         Session title, if the agent names it.
@@ -407,7 +400,7 @@ without a chat:
                 `Custom` when the session's policy matches no preset.
   context       `{ used = n, size = n }` tokens in the context window.
   tokens        `{ total = n, input = n, output = n }`: session totals
-                (Codex) or the last turn (ACP, if reported).
+                (Codex).
   cost          `{ amount = n, currency = s }` (ACP, if reported).
   limits        `{ primary = l, secondary = l }` account rate limits (Codex,
                 ChatGPT login), each `{ used = percent, window = minutes,
@@ -448,19 +441,18 @@ Example: >lua
         end,
     })
 <
-Turn progress is also shown as Neovim progress messages.
 
 ==============================================================================
 8. MAPPINGS                                                  *boomer-mappings*
 
 Boomer defines no global mappings. In the chat buffer:
 
-  <CR>          (Insert) Send the draft or run the command; queue it during
-                a turn (|boomer-queue|).
+  <CR>          (Insert) Send the draft or run the command; a prompt is
+                queued during a turn (|boomer-queue|).
   CTRL-C        (Insert, Normal) Cancel the active turn; queued prompts
-                return to the draft (|boomer-/cancel| discards them).
-  <S-Tab>       (Insert, Normal, Visual) Pick the session mode, like
-                |boomer-/mode|. With the completion menu open, it selects
+                return to the draft, like |boomer-/cancel|.
+  <S-Tab>       (Insert, Normal, Visual) Switch to the next session mode
+                (|boomer-/mode|). With the completion menu open, it selects
                 the previous item instead.
 
 Map |:Boomer| commands with |<Cmd>|: >lua
@@ -489,8 +481,8 @@ Groups are defined with `default = true`; override them with
                         |hl-Title|.
   BoomerWinbarBusy      Busy states in the winbar. Links to
                         `DiagnosticWarn`.
-  BoomerWinbarError     `failed`, `closed` and rate limits from 90% in the
-                        winbar. Links to `DiagnosticError`.
+  BoomerWinbarError     `no session`, `exited` and rate limits from 90% in
+                        the winbar. Links to `DiagnosticError`.
 
 ==============================================================================
 10. LUA API                                                       *boomer-api*
@@ -502,8 +494,7 @@ the command started, or nil after a warning.
   open()                Open or focus the chat; returns its buffer.
   run({line})           Run a |:Boomer| command line, such as `'model gpt-5'`.
   model([{value}]), effort([{value}]), mode([{value}]),
-  permissions([{preset}]),
-  settings(), resume([{id}]), new(), agent([{name}]),
+  permissions([{preset}]), resume([{id}]), new(), agent([{name}]),
   compact([{focus}]), usage(), help(), cancel(), close()
                         See |boomer-commands|.
   status()              See |boomer.status()|.

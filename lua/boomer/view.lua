@@ -21,8 +21,7 @@ local prompt_ns = api.nvim_create_namespace('boomer.prompt')
 ---@field window? table config `window` option.
 ---@field current? { role: string, id: string? } Message being streamed.
 ---@field submit? boolean Neovim starts the next output on a new line (b_prompt_append_new_line):
---- set when a submitted draft's prompt callback returns, cleared by appending.
----@field commit? boolean A draft was committed; Neovim sets `submit` when its callback returns.
+--- set initially and after a committed draft, cleared by appending.
 ---@field marks table<string, integer> Extmark IDs of the live prompt's decorations.
 ---@field queued string[] Queued prompts, shown as virtual lines (View:set_queued).
 local View = {}
@@ -54,13 +53,11 @@ vim.treesitter.language.register('markdown', 'boomer')
 
 -- opts.winbar: 'winbar' value for windows showing the chat (window-local per buffer).
 -- opts.labels: { user = 'Prompt:', agent = 'Agent:' }; the prompt is the user label
--- followed by a space. opts.window: how open() shows the chat (see View:open).
+-- followed by a space. opts.window: how open() shows the chat (config `window`).
 ---@return boomer.View
 function View.new(opts)
-    opts = opts or {}
     local buf = api.nvim_create_buf(false, true)
-    local labels =
-        vim.tbl_extend('force', { user = 'Prompt:', agent = 'Agent:' }, opts.labels or {})
+    local labels = opts.labels
     local prompt = labels.user:match('%s$') and labels.user or labels.user .. ' '
     local self = setmetatable(
         {
@@ -85,8 +82,7 @@ function View.new(opts)
     -- Initialize the native input mark before the buffer is first displayed.
     api.nvim_buf_set_lines(buf, 0, -1, false, { prompt })
     api.nvim_buf_set_mark(buf, ':', 1, #prompt, {})
-    -- Every change may move the prompt or change the line above it. A submit
-    -- moves the input mark only after this, so submitted() decorates again.
+    -- Every change may move the prompt or change the line above it.
     api.nvim_buf_attach(buf, false, {
         on_lines = function()
             if not self:valid() then
@@ -217,35 +213,38 @@ function View:output_end()
     return row, #api.nvim_buf_get_lines(self.buf, row, row + 1, false)[1]
 end
 
--- Mirror Neovim's state after a commit: once the prompt callback has returned
--- (it leaves the new input line empty until then), the next output starts on
--- a new line.
-function View:settle()
-    local row = self:row()
-    if self.commit and api.nvim_buf_get_lines(self.buf, row, row + 1, false)[1] ~= '' then
-        self.commit, self.submit = false, true
-    end
-end
-
 -- Append text to the output (continuing its last line, or on a new line
 -- after a submitted draft) and return the range it now occupies: start
 -- row/col, end row/col.
 function View:append(text)
-    self:settle()
     self.submit = false
     local row, col = self:output_end()
+    -- Continuing a line rewrites it, which collapses the highlights on it
+    -- (such as a user label); they are put back on the unchanged prefix.
+    local marks = col > 0
+            and api.nvim_buf_get_extmarks(self.buf, ns, { row, 0 }, { row, -1 }, { details = true })
+        or {}
     vim.fn.prompt_appendbuf(self.buf, vim.split(text, '\n', { plain = true }))
+    for _, m in ipairs(marks) do
+        local d = m[4]
+        if d.end_row == row then
+            api.nvim_buf_set_extmark(self.buf, ns, row, m[3], {
+                id = m[1],
+                end_row = row,
+                end_col = d.end_col,
+                hl_group = d.hl_group,
+                priority = d.priority,
+                strict = false,
+            })
+        end
+    end
     local end_row, end_col = self:output_end()
     return row, col, end_row, end_col
 end
 
 -- Separator that starts a new block after exactly one blank line, given
 -- what the output ends with and whether Neovim starts it on a new line.
--- Inside the prompt callback Neovim has not set that yet, so output written
--- there continues the submitted line, unless nothing was written since the
--- previous draft.
 function View:gap()
-    self:settle()
     local row = self:row()
     local lines = api.nvim_buf_get_lines(self.buf, math.max(row - 2, 0), row, false)
     if #lines == 0 then
@@ -292,21 +291,15 @@ function View:name(role)
     return ((self.labels[role] or role):gsub('%s+$', ''))
 end
 
--- Called from the prompt callback after Neovim committed the input above the new prompt.
--- Also used for unsent input, which stays visible (followed by a warning).
--- The committed "<prompt><text>" lines already are a user message; only the
--- label is highlighted.
-function View:submitted(text)
-    self.current = nil
-    local first = self:row() - #vim.split(text, '\n', { plain = true })
-    label(self.buf, first, #self:name('user'), 'BoomerUserLabel')
-    -- Neovim closes the submitted line when this callback returns; an
-    -- earlier commit has returned by now.
-    if self.commit then
-        self.submit = true
-    end
-    self.commit = true
-    self:decorate()
+-- Remove a draft Neovim committed into the output from the prompt callback
+-- (keys such as <C-j> bypass the <CR> mapping), so it can be submitted like
+-- any other. Neovim starts the next output on a new line once the callback
+-- returns; nothing may be written before then.
+function View:uncommit(text)
+    local row = self:row()
+    local n = #vim.split(text, '\n', { plain = true })
+    api.nvim_buf_set_lines(self.buf, math.max(row - n, 0), row, false, {})
+    self.submit = true
 end
 
 -- Stream text into the current message, starting a new labelled block when
@@ -392,12 +385,7 @@ function View:open()
     if win then
         api.nvim_set_current_win(win)
     else
-        local w = vim.tbl_extend(
-            'force',
-            { position = 'right', width = 0.5, height = 0.5 },
-            self.window or {}
-        )
-        open_win(self.buf, w)
+        open_win(self.buf, self.window)
         vim.wo.wrap = true
         vim.wo.number = false
         vim.wo.relativenumber = false

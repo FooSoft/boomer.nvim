@@ -59,8 +59,8 @@ A profile supports the following fields:
 
 Specifies user slash commands. Mapping a name to `false` disables the built-in command of that name; user commands also override agent commands. A command has a `desc`, an optional `complete` list (or a function returning one), and exactly one of the following:
 
-*   `prompt`: text sent as a prompt, where `$ARGUMENTS` is replaced by the arguments (appended after a blank line otherwise); may also be a `function(args, ctx)` returning the text
-*   `run`: a `function(args, ctx)` run in Neovim
+*   `prompt`: text sent as a prompt, where `$ARGUMENTS` is replaced by the arguments (appended after a blank line otherwise)
+*   `run`: a `function(args, ctx)` run in Neovim; `ctx.send(text)` sends a prompt (queued during a turn)
 
 ```lua
 commands = {
@@ -122,17 +122,17 @@ vim.keymap.set('n', '<Leader>am', '<Cmd>Boomer model<CR>')
 vim.keymap.set('n', '<Leader>ac', '<Cmd>Boomer cancel<CR>')
 ```
 
-Each command below can be run as `:Boomer {command}` with command-line completion, or typed in the prompt as `/command` with <kbd>Ctrl-X</kbd> <kbd>Ctrl-O</kbd> or <kbd>Ctrl-N</kbd> completion; start the draft with `//` to send a literal `/text`. Commands that take an argument open a picker without one, and commands without an argument refuse one. Each command writes its result into the chat, such as `[Setting: model = GPT-5]`, `[Session: new]` or `[Agent: copilot]`.
+Each command below can be run as `:Boomer {command}` with command-line completion, or typed in the prompt as `/command` with <kbd>Ctrl-X</kbd> <kbd>Ctrl-O</kbd> or <kbd>Ctrl-N</kbd> completion; start the draft with `//` to send a literal `/text`. Commands that take an argument open a picker without one, and commands without an argument refuse one. A command that runs is echoed into the chat as typed, such as `/model gpt-5`, followed by its result, such as `[Setting: model = GPT-5]`; `/new`, `/resume` and `/agent` announce theirs in the new chat buffer, such as `[Session: new]` or `[Agent: copilot]`.
 
 Slash commands advertised by ACP agents (such as Copilot's `/plan`) are sent to the agent; unknown ones are not sent.
 
 #### `Boomer`
 
-Opens or focuses the chat, starting the default agent.
+Opens or focuses the chat, starting the default agent. If the agent has exited, restarts it in the same window, keeping the draft.
 
 #### `/model [id]`
 
-Sets the session's model by ID or name.
+Sets the session's model by ID or name. Settings change at once, also during a turn; Codex applies them from its next turn. Without such a setting, an agent command of the same name is used, if the agent has one.
 
 #### `/effort [level]`
 
@@ -142,17 +142,13 @@ Sets the reasoning effort.
 
 Sets the session mode, such as `plan` for Codex. Copilot's `/plan` enters plan mode, and only `/mode agent` leaves it.
 
-#### `/settings [id [value]]`
-
-Sets any session setting the agent offers.
-
 #### `/permissions [preset]`
 
 Chooses what the agent may do without asking: Read Only, Default or Full Access for Codex; `default`, `assisted` or `allow-all` for Copilot.
 
 #### `/resume [id]`
 
-Loads a saved session for the working directory.
+Loads a saved session for the working directory; when this starts the agent, dismissing the picker starts a new session. The draft is kept in the new chat buffer, as with `/new` and `/agent`.
 
 #### `/new`
 
@@ -164,7 +160,7 @@ Stops the current agent and starts another profile in the same window.
 
 #### `/compact [focus]`
 
-Summarizes the conversation to free context.
+Summarizes the conversation to free context. Codex compacts between turns only; ACP agents use their own `/compact` command, if they have one.
 
 #### `/usage`
 
@@ -176,9 +172,9 @@ Lists the available commands, including user and agent commands.
 
 #### `/cancel`
 
-Cancels the active turn and discards queued prompts and commands.
+Cancels the active turn and returns queued prompts to the draft, like <kbd>Ctrl-C</kbd>.
 
-#### `Boomer close`
+#### `/close`
 
 Stops the agent and wipes the chat buffer.
 
@@ -191,9 +187,9 @@ The chat opens in Insert mode with the cursor after `Prompt: `. The following ke
 | <kbd>Enter</kbd>       | Sends the draft or runs the command; queues it during a turn    |
 | <kbd>Shift-Enter</kbd> | Adds a line to the draft                                        |
 | <kbd>Ctrl-C</kbd>      | Cancels the active turn and returns queued prompts to the draft |
-| <kbd>Shift-Tab</kbd>   | Picks the session mode                                          |
+| <kbd>Shift-Tab</kbd>   | Switches to the next session mode                               |
 
-Queued prompts are sent one per turn, in order. Setting commands (`/model`, `/permissions`, ...) and `/compact` typed during a turn are queued too and run between turns. Errors and warnings are written into the transcript, and are also shown with `vim.notify` while the chat is hidden.
+Prompts sent during a turn, or while the session loads, are queued and sent one per turn, in order; they are shown next to the prompt until they are sent. Commands are never queued: they run at once. A draft that cannot be sent or run now, such as `/new` during a turn, stays in the prompt, and a warning says why. Errors and warnings are written into the transcript, and are also shown with `vim.notify` while the chat is hidden.
 
 ## Status
 

@@ -49,6 +49,61 @@
             "op": "expect_request",
             "message": {
                 "id": {
+                    "capture": "models"
+                },
+                "method": "model/list",
+                "params": {
+                    "limit": 100
+                }
+            }
+        },
+        {
+            "op": "send_response",
+            "message": {
+                "id": {
+                    "ref": "models"
+                },
+                "result": {
+                    "data": [
+                        {
+                            "defaultReasoningEffort": "high",
+                            "description": "fixture",
+                            "displayName": "fixture",
+                            "hidden": false,
+                            "id": "m1",
+                            "isDefault": true,
+                            "model": "m1",
+                            "supportedReasoningEfforts": [
+                                {
+                                    "reasoningEffort": "high",
+                                    "description": "high"
+                                }
+                            ]
+                        },
+                        {
+                            "defaultReasoningEffort": "high",
+                            "description": "fixture",
+                            "displayName": "fixture",
+                            "hidden": false,
+                            "id": "m2",
+                            "isDefault": false,
+                            "model": "m2",
+                            "supportedReasoningEfforts": [
+                                {
+                                    "reasoningEffort": "high",
+                                    "description": "high"
+                                }
+                            ]
+                        }
+                    ],
+                    "nextCursor": null
+                }
+            }
+        },
+        {
+            "op": "expect_request",
+            "message": {
+                "id": {
                     "capture": "new"
                 },
                 "method": "thread/resume",

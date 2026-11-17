@@ -13,7 +13,7 @@ local M = {}
 ---@field rpc boomer.Rpc
 ---@field on boomer.Callbacks
 ---@field profile boomer.Profile
----@field models? table[] model/list data, fetched on first use.
+---@field models table[] model/list data, fetched at startup.
 ---@field model? string Staged by the user for the next turn.
 ---@field effort? string Staged by the user for the next turn.
 ---@field mode? string Staged collaboration mode ('default' or 'plan').
@@ -29,14 +29,14 @@ local M = {}
 local Codex = {}
 Codex.__index = Codex
 
--- Start the app server and initialize it; cb(err) runs when it is ready.
--- Profile args follow the fixed server arguments.
+-- Start the app server, initialize it and fetch its models; cb(err) runs when
+-- it is ready. Profile args follow the fixed server arguments.
 ---@param profile boomer.Profile
 ---@param on boomer.Callbacks
 ---@param cb fun(err: { message: string }?)
 ---@return boomer.Codex?, string?
 function M.start(profile, on, cb)
-    local self = setmetatable({ on = on, requests = {}, profile = profile }, Codex)
+    local self = setmetatable({ on = on, requests = {}, profile = profile, models = {} }, Codex)
     local rpc, err = Rpc.start({
         cmd = vim.list_extend(
             { profile.command, 'app-server', '--listen', 'stdio://' },
@@ -64,10 +64,19 @@ function M.start(profile, on, cb)
         clientInfo = { name = 'boomer', version = '0.1.0' },
         capabilities = { experimentalApi = true },
     }, function(e)
-        if not e then
-            rpc:notify('initialized')
+        if e then
+            return cb(e)
         end
-        cb(e)
+        rpc:notify('initialized')
+        -- Without models the chat still works; /model has nothing to offer.
+        rpc:request('model/list', { limit = 100 }, function(err, r)
+            if err then
+                on.error('model list: ' .. err.message)
+            else
+                self.models = r.data or {}
+            end
+            cb()
+        end)
     end)
     return self
 end
@@ -244,45 +253,30 @@ local function effort_choices(models, model)
     return {}
 end
 
--- Profile defaults are matched by ID or name against model/list, fetched only
--- when a model or effort default is set. The model goes to thread/start, the
--- effort and mode are staged for the first turn; a value that is not offered
--- is reported and skipped.
+-- Profile defaults are matched by ID or name. The model goes to
+-- thread/start, the effort and mode are staged for the first turn; a value
+-- that is not offered is reported and skipped.
 function Codex:new_session(cwd, cb)
     local p = self.profile
-    local mode = p.mode and util.choice({ choices = modes }, p.mode)
-    if p.mode and not mode then
-        self.on.error(('default mode: %s is not offered by this agent'):format(p.mode))
-    end
-    local function start(model, effort)
-        self:open('thread/start', { cwd = cwd, model = model }, function(err)
-            if not err and (effort or mode) then
-                self.effort, self.mode = effort, mode and mode.value
-                self:report()
-            end
-            cb(err)
-        end)
-    end
-    if not p.model and not p.effort then
-        return start()
-    end
-    self:settings(function(err)
-        if err then
-            self.on.error('default model and effort not checked: ' .. err.message)
-            return start(p.model, p.effort)
+    local function resolve(key, choices)
+        if not p[key] then
+            return nil
         end
-        local function resolve(key, choices)
-            if not p[key] then
-                return nil
-            end
-            local choice = util.choice({ choices = choices }, p[key])
-            if not choice then
-                self.on.error(('default %s: %s is not offered by this agent'):format(key, p[key]))
-            end
-            return choice and choice.value
+        local choice = util.choice({ choices = choices }, p[key])
+        if not choice then
+            self.on.error(('default %s: %s is not offered by this agent'):format(key, p[key]))
         end
-        local model = resolve('model', model_choices(self.models))
-        start(model, resolve('effort', effort_choices(self.models, model)))
+        return choice and choice.value
+    end
+    local model = resolve('model', model_choices(self.models))
+    local effort = resolve('effort', effort_choices(self.models, model))
+    local mode = resolve('mode', modes)
+    self:open('thread/start', { cwd = cwd, model = model }, function(err)
+        if not err and (effort or mode) then
+            self.effort, self.mode = effort, mode
+            self:report()
+        end
+        cb(err)
     end)
 end
 
@@ -580,22 +574,9 @@ local function approval(method, p)
     if not commands and method ~= 'item/fileChange/requestApproval' then
         return nil
     end
-    -- Older servers do not list the decisions; offer what they accept.
-    local decisions = p.availableDecisions
-    if type(decisions) ~= 'table' then
-        decisions = { 'accept', 'acceptForSession', 'decline', 'cancel' }
-        if commands and p.proposedExecpolicyAmendment then
-            decisions[#decisions + 1] = {
-                acceptWithExecpolicyAmendment = {
-                    execpolicy_amendment = p.proposedExecpolicyAmendment,
-                },
-            }
-        end
-        for _, amendment in ipairs(commands and p.proposedNetworkPolicyAmendments or {}) do
-            decisions[#decisions + 1] =
-                { applyNetworkPolicyAmendment = { network_policy_amendment = amendment } }
-        end
-    end
+    -- Servers that do not list the decisions accept these.
+    local decisions = type(p.availableDecisions) == 'table' and p.availableDecisions
+        or { 'accept', 'acceptForSession', 'decline', 'cancel' }
     local choices = {}
     for _, d in ipairs(decisions) do
         if d ~= 'decline' then
@@ -635,26 +616,9 @@ function Codex:server_request(method, p, reply, id)
     self.on.permission(req)
 end
 
--- Fetch the model list once, then answer with the settings.
-function Codex:settings(cb)
-    if self.models then
-        cb(nil, self:setting_list())
-        return
-    end
-    self.rpc:request('model/list', { limit = 100 }, function(err, r)
-        if err then
-            cb(err)
-            return
-        end
-        self.models = r.data or {}
-        cb(nil, self:setting_list())
-    end)
-end
-
--- Model, effort, mode and permissions, from what is known locally: before
--- the model list is fetched, only modes and permission presets have choices.
+-- Model, effort, mode and permissions.
 ---@return boomer.Setting[]
-function Codex:setting_list()
+function Codex:settings()
     local model = self.model or self.current_model
     return {
         {

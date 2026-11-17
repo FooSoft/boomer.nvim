@@ -1,9 +1,9 @@
 -- The chat: one at a time, made of an agent client (boomer.codex or
 -- boomer.acp), its current session, and the prompt buffer showing it
 -- (boomer.view). Switching sessions keeps the client and swaps in a fresh
--- buffer; switching agents replaces both.
+-- buffer; switching agents, or restarting one that exited, replaces both.
 --
--- Data flow: the prompt callback and :Boomer commands call into this module,
+-- Data flow: <CR> in the prompt and :Boomer commands call into this module,
 -- which drives the client; the client talks JSON-RPC to the agent
 -- (boomer.rpc) and reports back through the `on` callbacks set up in start().
 -- All callbacks run on the main loop, so no locking is needed.
@@ -40,9 +40,8 @@
 ---@field cancel fun(self, cb: fun(err: table)?)
 ---@field compact? fun(self, cb: fun(err: table?, status: string?)) Native compaction, if supported.
 ---@field rate_limits? fun(self, cb: fun()) Refresh the `limits` status before /usage.
----@field setting_list fun(self): boomer.Setting[] What is known without asking the agent.
----@field settings fun(self, cb: fun(err: table?, list: boomer.Setting[]?)) May ask the agent.
----@field configure fun(self, id: string, value: any, cb: fun(err: table?))
+---@field settings fun(self): boomer.Setting[]
+---@field configure fun(self, id: string, value: any, cb: fun(err: table?)) Codex: from the next turn.
 
 local config = require('boomer.config')
 local util = require('boomer.util')
@@ -53,31 +52,26 @@ local M = {}
 ---@class boomer.Chat
 ---@field opts boomer.Profile
 ---@field client? boomer.Client nil if the agent failed to start.
----@field view table boomer.view instance showing the current session.
+---@field view boomer.View Shows the current session.
 ---@field state boomer.Status
 ---@field session? string Open session ID (set once it is ready).
 ---@field agent_commands table<string, table> Slash commands advertised by the agent.
----@field sessions? table[] Last listed saved sessions (for completion).
+---@field sessions? table[] Last listed saved sessions (for their titles).
 ---@field queue boomer.Permission[] Permission requests waiting to be shown.
 ---@field prompts boomer.Queued[] Prompts waiting for the turn or session to be ready.
 ---@field asking? boomer.Permission The request being shown.
 ---@field loading? boolean Starting the agent or opening a session.
 ---@field busy? boolean A turn is running.
----@field applying? boolean A queued command (such as a setting change) is running.
 ---@field cancelling? boolean
 ---@field dead? boolean The agent exited or failed to start.
 ---@field closed? boolean Closed by the user; callbacks are ignored.
 ---@field picks? integer Picker generation; see pick().
----@field progress? integer ID of the running progress message.
----@field said? integer Warnings and errors written to the transcript so far.
 ---@field announce? 'agent'|'session' Confirm the switch once the session is ready.
 
----A queued prompt, or (without `text`) a command line run by `exec`.
+---A queued prompt.
 ---@class boomer.Queued
----@field text? string Sent to the agent.
----@field line string As typed (commands: with the argument resolved, such as
----`/mode plan`); shown when sent, or put back into the draft.
----@field shown? boolean Already in the transcript (committed by the prompt buffer).
+---@field text string Sent to the agent.
+---@field line string As typed: shown when sent, or put back into the draft.
 
 ---@type boomer.Chat?
 local chat
@@ -105,25 +99,11 @@ local function status(c, s)
     update(c, { state = s })
 end
 
--- A progress message (:help progress-message) for the running turn, updated
--- in place by its ID. Older UIs without it are skipped.
-local function progress(c, state, msg)
-    local ok, id = pcall(vim.api.nvim_echo, { { msg } }, false, {
-        id = c.progress,
-        kind = 'progress',
-        source = 'boomer',
-        title = 'Boomer',
-        status = state,
-    })
-    c.progress = ok and state == 'running' and id or nil
-end
-
 -- Write a warning or error into the chat's transcript; also notify while the
 -- chat is hidden, and only notify without a chat.
 local function say(c, kind, msg, level)
     msg = msg:gsub('%s+$', '')
     if c and not c.closed and c.view:valid() then
-        c.said = (c.said or 0) + 1
         c.view:write(kind .. ': ' .. msg, 'Boomer' .. kind)
         if c.view:visible() then
             return
@@ -150,14 +130,13 @@ end
 -- Prompt queue ------------------------------------------------------------------
 --
 -- Prompts submitted while a turn runs or the session loads wait in c.prompts
--- and are sent one per turn, in order (drain). Commands such as /model wait
--- there too and run between turns. They are shown as virtual lines until
--- sent. A cancel, a failed turn or command, or the loss of the session puts
+-- and are sent one per turn, in order (drain). They are shown as virtual
+-- lines until sent. A cancel, a failed turn or the loss of the session puts
 -- them back into the draft (restore).
 
--- Whether new prompts and commands must wait in the queue.
+-- Whether new prompts must wait in the queue.
 local function occupied(c)
-    return c.busy or c.loading or c.applying or #c.prompts > 0
+    return c.busy or c.loading or #c.prompts > 0
 end
 
 local function sync_queue(c)
@@ -167,7 +146,16 @@ local function sync_queue(c)
     update(c, { queued = #c.prompts > 0 and #c.prompts or vim.NIL })
 end
 
--- Move the queued prompts into the draft, before what is being typed.
+-- Put text back into the draft, before what is being typed.
+local function unshift(view, text)
+    if text == '' or not view:valid() then
+        return
+    end
+    local current = view:draft()
+    view:set_draft(current ~= '' and (text .. '\n\n' .. current) or text)
+end
+
+-- Move the queued prompts into the draft.
 local function restore(c)
     if #c.prompts == 0 then
         return
@@ -177,19 +165,13 @@ local function restore(c)
     end, c.prompts)
     c.prompts = {}
     sync_queue(c)
-    if c.view:valid() then
-        local current = c.view:draft()
-        if current ~= '' then
-            parts[#parts + 1] = current
-        end
-        c.view:set_draft(table.concat(parts, '\n\n'))
-    end
+    unshift(c.view, table.concat(parts, '\n\n'))
 end
 
 local function fail(c, msg)
     report(c, msg)
     c.dead, c.loading = true, false
-    status(c, 'failed')
+    status(c, 'exited')
     restore(c)
     if c.client then
         c.client:close()
@@ -204,16 +186,13 @@ local function close(c)
     if c.client then
         c.client:close()
     end
-    if c.busy then
-        progress(c, 'failed', 'closed')
-    end
 end
 
 -- Pickers --------------------------------------------------------------------
 --
 -- vim.ui.select pickers leave Insert mode. A picker opened from Insert mode in
--- the chat (typing /model) returns there once it, and any picker its answer
--- opens, is done, so the user can keep typing.
+-- the chat (typing /model) returns there when it is answered in Normal mode
+-- with the chat window current.
 
 -- Start Insert mode at the end of the draft if `win` is the current chat window.
 local function insert(win)
@@ -226,61 +205,20 @@ local function insert(win)
     vim.cmd.startinsert({ bang = true })
 end
 
--- Insert mode in `win` after a picker, once Normal mode is back: some pickers
--- answer before leaving their own mode (fzf-lua answers in Terminal mode).
-local function resume(win)
-    local mode = vim.api.nvim_get_mode().mode
-    if mode == 'n' then
-        return insert(win)
-    elseif mode:sub(1, 1) == 'i' then
-        return
-    end
-    vim.api.nvim_create_autocmd('ModeChanged', {
-        group = group,
-        callback = function()
-            local new = vim.v.event.new_mode
-            if new == 'n' then
-                vim.schedule(function()
-                    if vim.api.nvim_get_mode().mode == 'n' then
-                        insert(win)
-                    end
-                end)
-            end
-            -- Returning true deletes the autocmd.
-            return new == 'n' or new:sub(1, 1) == 'i'
-        end,
-    })
-end
-
--- The picker whose answer is being handled, so pickers it opens inherit its
--- `resume` window instead of returning to Insert mode in between.
-local answering
-
 -- vim.ui.select with the callback scheduled once; cb(nil, err) if the UI
--- throws. The picker opens on the next tick: one opened inside the prompt
--- callback would start in Normal mode, as Insert mode ends when the callback
--- returns. If wanted() is false by then, it is not opened and cb(nil) runs.
+-- throws. The picker opens on the next tick, after the mapping that opened
+-- it. If wanted() is false by then, it is not opened and cb(nil) runs.
 local function select(items, opts, cb, wanted)
-    local picker = { resume = answering and answering.resume }
-    if answering then
-        answering.chained = true
-    elseif vim.api.nvim_get_mode().mode == 'i' and vim.bo.filetype == 'boomer' then
-        picker.resume = vim.api.nvim_get_current_win()
-    end
+    local mode = vim.api.nvim_get_mode().mode
+    local win = mode == 'i' and vim.bo.filetype == 'boomer' and vim.api.nvim_get_current_win()
     local answered = false
     local function answer(item, err)
         if not answered then
             answered = true
             vim.schedule(function()
-                local outer = answering
-                answering = picker
-                local ok, e = pcall(cb, item, err)
-                answering = outer
-                if picker.resume and not picker.chained then
-                    resume(picker.resume)
-                end
-                if not ok then
-                    error(e, 0)
+                cb(item, err)
+                if win and vim.api.nvim_get_mode().mode == 'n' then
+                    insert(win)
                 end
             end)
         end
@@ -324,47 +262,40 @@ local function pending(c)
     return c.asking and not c.asking.done and c.asking
 end
 
--- Why a command with precondition `gate` cannot run now, or nil. Gates
--- (named by commands.builtins):
+local no_session = 'No session; use /new or /resume'
+
+-- Why a command with precondition `gate` cannot run now, or nil. Gates:
 --   none     always runs
---   session  needs an open session; may run during a turn (/usage)
+--   session  needs an open session; may run during a turn
+--   queue    prompt text: needs a session, or one loading; queued while busy
 --   idle     needs an open session with nothing in progress
---   queue    prompt text: like idle, but is queued during a turn or while
---            the session loads
---   later    commands such as /model: need an open session; their resolved
---            line is queued during a turn (see dispatch())
---   switch   replaces the session: starts a chat if there is none, and
---            refuses to drop an unsent draft (unless the draft is the command
---            itself, `typed`)
---   agent    like switch, and also replaces an agent that exited
-local function blocked(c, gate, typed)
-    local switching = gate == 'switch' or gate == 'agent'
-    if gate == 'none' or not c and switching or c and c.dead and gate == 'agent' then
+--   switch   replaces the session: needs nothing in progress; starts a chat
+--            if there is none, or restarts an agent that exited
+local function blocked(c, gate)
+    if gate == 'none' or gate == 'switch' and (not c or c.dead) then
         return nil
     elseif not c then
         return 'Open a conversation with :Boomer first'
     elseif c.dead then
-        return 'The agent has exited; use :Boomer close, then :Boomer'
+        return 'The agent has exited; :Boomer restarts it'
     elseif gate == 'queue' then
-        return not c.loading and not c.session and 'No session; use /new or /resume' or nil
+        return not c.loading and not c.session and no_session or nil
     elseif c.loading then
         return 'The conversation is still loading'
-    elseif gate == 'session' or gate == 'later' then
-        return not c.session and 'No session; use /new or /resume' or nil
+    elseif gate == 'session' then
+        return not c.session and no_session or nil
     elseif pending(c) then
         return 'A permission request is waiting; :Boomer shows it again'
-    elseif c.busy or c.applying then
+    elseif occupied(c) then
         return 'A turn is still active; wait or use /cancel'
-    elseif switching then
-        return not typed and c.view:draft() ~= '' and 'Send or clear the draft before switching'
-            or nil
+    elseif gate == 'idle' then
+        return not c.session and no_session or nil
     end
-    return not c.session and 'No session; use /new or /resume' or nil
 end
 
 -- Warn and return false if the command cannot run.
-local function check(c, gate, typed)
-    local msg = blocked(c, gate, typed)
+local function check(c, gate)
+    local msg = blocked(c, gate)
     if msg then
         warn(msg, c)
         return false
@@ -441,7 +372,6 @@ local drain
 local function turn(c, start, done)
     c.busy = true
     status(c, 'running')
-    progress(c, 'running', 'running')
     local buf = c.view.buf
     start(function(err, result)
         c.busy, c.cancelling = false, false
@@ -455,7 +385,6 @@ local function turn(c, start, done)
         if not c.dead then
             status(c, 'ready')
         end
-        progress(c, err and 'failed' or 'success', err and 'failed' or result)
         vim.schedule(function()
             vim.api.nvim_exec_autocmds('User', {
                 pattern = 'BoomerTurnDone',
@@ -473,121 +402,48 @@ local function turn(c, start, done)
     end)
 end
 
--- Messages sent from outside the prompt line get unique IDs, so each starts
--- its own block in the view.
+-- Each user message gets a unique ID, so each starts its own block in the
+-- view.
 local echo_id = 0
 
-local function echo(c, text)
+-- Show a prompt or command line as the user's message.
+local function echo(c, line)
     echo_id = echo_id + 1
-    c.view:message('user', text, 'boomer-echo-' .. echo_id)
+    c.view:message('user', line, 'boomer-echo-' .. echo_id)
 end
 
--- Show a command's line as the user's message unless it is already in the
--- transcript (`shown`: typed in the prompt).
-local function echo_command(c, line, shown)
-    if not shown then
-        echo(c, line)
-    end
-end
-
--- Send text as a prompt. `user` is shown as the user's message when the text
--- did not come from the prompt line itself (Ex commands, Lua).
-local function send(c, text, user)
-    if user then
-        echo(c, user)
-    end
+-- Send text as a prompt, shown as `line`.
+local function send(c, text, line)
+    echo(c, line)
     turn(c, function(cb)
         c.client:prompt(text, cb)
     end)
 end
 
--- Commands that run between turns, by name: exec[name](c, args, done). They
--- are given as complete lines, such as `/model gpt-5` (see dispatch()), and
--- call done(err) when the queue may go on.
-local exec = {}
-
--- Run a command line; a failed one returns the rest of the queue to the draft.
-local function act(c, e)
-    if not e.shown then
-        echo(c, e.line)
-    end
-    c.applying = true
-    local called = false
-    local function done(err)
-        if called or c.closed or c.dead then
-            return
-        end
-        called, c.applying = true, false
-        if err then
-            report(c, err)
-            restore(c)
-        else
-            drain(c)
-        end
-    end
-    local cmd = commands.parse(e.line)
-    local ok, err = pcall(exec[cmd.name], c, cmd.args, done)
-    if not ok then
-        done(e.line .. ': ' .. tostring(err))
-    end
-end
-
--- Send the next queued prompt, or run the next queued command, if the
--- session is ready for it.
+-- Send the next queued prompt if the session is ready for it.
 function drain(c)
-    if c.busy or c.loading or c.applying or c.dead or c.closed or not c.session then
+    if c.busy or c.loading or c.dead or c.closed or not c.session then
         return
     end
     local e = table.remove(c.prompts, 1)
-    if not e then
-        return
+    if e then
+        sync_queue(c)
+        send(c, e.text, e.line)
     end
-    sync_queue(c)
-    if e.text then
-        send(c, e.text, not e.shown and e.line or nil)
-    else
-        act(c, e)
-    end
-end
-
--- Add an entry to the queue; a line already in the transcript is marked.
-local function enqueue(c, e)
-    c.prompts[#c.prompts + 1] = e
-    sync_queue(c)
-    if e.shown then
-        c.view:write('[queued]')
-    end
-    drain(c)
 end
 
 -- Send prompt text now, or queue it while a turn runs or the session loads
--- (callers check the `queue` gate). `line` is the text as typed; `shown`: it
--- is already in the transcript.
-local function submit(c, text, line, shown)
+-- (callers check the `queue` gate). `line` is shown as the user's message.
+local function submit(c, text, line)
     if not occupied(c) then
-        return send(c, text, not shown and line or nil)
+        return send(c, text, line)
     end
-    enqueue(c, { text = text, line = line, shown = shown })
-end
-
--- Run a command line for exec, such as `/model gpt-5`, now, or queue it
--- after what is in progress (callers check the `later` gate). It is shown as
--- the user's message when it runs unless `shown` (already in the
--- transcript).
-local function dispatch(c, line, shown)
-    local e = { line = line, shown = shown }
-    if occupied(c) then
-        return enqueue(c, e)
-    end
-    act(c, e)
+    c.prompts[#c.prompts + 1] = { text = text, line = line }
+    sync_queue(c)
+    drain(c)
 end
 
 -- Commands --------------------------------------------------------------------
-
--- Set while a command typed in the prompt runs: the draft (being that line)
--- does not block a switch. `committed`: the line is also in the transcript
--- (not when it was queued without committing it during a turn).
-local typed, committed = false, false
 
 local function unknown(name)
     return warn(
@@ -605,7 +461,7 @@ local function extra_args(item, args)
     return false
 end
 
--- Context passed to user commands (see :help boomer-user-commands).
+-- Context passed to user `run` commands (see :help boomer-user-commands).
 local function context(args)
     local c = chat
     return {
@@ -613,8 +469,8 @@ local function context(args)
         buf = c and c.view.buf,
         status = M.status(),
         send = function(text)
-            if c and chat == c and check(c, 'idle') then
-                send(c, text, text)
+            if c and chat == c and can_send(c, text) then
+                submit(c, text, text)
                 return true
             end
         end,
@@ -627,35 +483,24 @@ local function context(args)
 end
 
 -- Run a slash command: a builtin (M[name]), an agent command (sent as text)
--- or a user command (`run` or a `prompt` template). Returns true if it ran.
--- Text for the agent is queued during a turn; `shown`: the typed line is
--- already in the transcript.
-local function run_command(c, name, args, from_prompt, shown)
+-- or a user command (`run` or a `prompt` template). Returns true if it ran,
+-- was sent or was queued.
+local function run_command(c, name, args)
     local item =
-        commands.find(config.options.commands, c and c.agent_commands or {}, name, from_prompt)
+        commands.find(config.options.commands, c and c.agent_commands or {}, name)
     if not item then
         return unknown(name)
     elseif extra_args(item, args) then
         return
+    elseif item.source == 'builtin' then
+        return M[name](args ~= '' and args or nil)
     end
     local line = '/' .. name .. (args ~= '' and (' ' .. args) or '')
-    if item.source == 'builtin' then
-        typed, committed = from_prompt, from_prompt and shown or false
-        local ok, res = pcall(M[name], args ~= '' and args or nil)
-        typed, committed = false, false
-        if not ok then
-            error(res, 0)
-        end
-        return res
-    elseif item.source == 'agent' then
-        if check(c, 'queue') then
-            submit(c, line, line, shown)
-            return true
-        end
-        return
-    end
     local spec = item.spec
-    if spec.run then
+    if item.source == 'user' and spec.run then
+        if c then
+            echo(c, line)
+        end
         local ok, err = pcall(spec.run, args, context(args))
         if not ok then
             return warn('/' .. name .. ': ' .. tostring(err))
@@ -664,45 +509,27 @@ local function run_command(c, name, args, from_prompt, shown)
     elseif not check(c, 'queue') then
         return
     end
-    local ok, text = pcall(commands.expand, spec, args, context(args))
-    if not ok then
-        return warn('/' .. name .. ': ' .. tostring(text))
-    elseif type(text) ~= 'string' or not text:find('%S') then
+    local text = item.source == 'user' and commands.expand(spec, args) or line
+    if not text:find('%S') then
         return warn('/' .. name .. ' produced an empty prompt')
     end
-    submit(c, text, line, shown)
+    submit(c, text, line)
     return true
 end
 
--- Checked when Enter is pressed, before Neovim commits the draft, so a draft
--- that would be rejected stays editable. Returns the draft's gate if it can
--- be submitted.
-local function can_submit(c, text)
+-- Submit a draft typed in the prompt; one that cannot be submitted now goes
+-- back into the draft, after a warning saying why.
+local function enter(c, view, text)
     local cmd = commands.parse(text)
-    if not cmd or cmd.text then
-        return can_send(c, cmd and cmd.text or text) and 'queue'
-    end
-    local item = commands.find(config.options.commands, c.agent_commands, cmd.name, true)
-    if not item then
-        return unknown(cmd.name)
-    elseif extra_args(item, cmd.args) then
-        return
-    end
-    local gate = item.source == 'builtin' and item.spec.gate
-        or item.source == 'user' and item.spec.run and 'none'
-        or 'queue'
-    return check(c, gate, true) and gate
-end
-
--- Submit a draft typed in the prompt; `shown`: Neovim committed it into the
--- transcript. Returns true if it ran, was sent or was queued.
-local function submit_draft(c, text, shown)
-    local cmd = commands.parse(text)
+    local ok
     if cmd and cmd.name then
-        return run_command(c, cmd.name, cmd.args, true, shown)
+        ok = run_command(c, cmd.name, cmd.args)
     elseif can_send(c, cmd and cmd.text or text) then
-        submit(c, cmd and cmd.text or text, text, shown)
-        return true
+        submit(c, cmd and cmd.text or text, text)
+        ok = true
+    end
+    if not ok then
+        unshift(view, text)
     end
 end
 
@@ -720,61 +547,62 @@ local function interrupt(c)
     end)
 end
 
--- CTRL-C in the chat: cancel the running turn and return the queued prompts to
--- the draft, also when no turn runs yet (queued while the session loads).
-local function stop()
-    local c = chat
+-- Cancel the running turn and return the queued prompts to the draft, also
+-- when no turn runs yet (queued while the session loads).
+local function cancel(c)
     local queued = c and #c.prompts > 0
     if queued then
         restore(c)
     end
-    if not c or not c.busy then
-        return queued or warn('No active Boomer turn', c)
+    if c and c.busy then
+        interrupt(c)
+    elseif not queued then
+        return warn('Nothing to cancel', c)
     end
-    interrupt(c)
     return true
 end
 
 -- Chat buffer -------------------------------------------------------------------
 
+local next_mode
+
 local function attach(c, view)
     local buf = view.buf
-    vim.fn.prompt_setcallback(buf, function(text)
-        -- Neovim already committed the input (<C-j> bypasses the <CR> guard),
-        -- so a rejected draft is marked as such, unless a warning says why.
-        local cmd = commands.parse(text)
-        local said = c.said
-        view:submitted(text)
-        if not submit_draft(c, text, true) and c.said == said then
-            view:write(cmd and cmd.name and '[not run]' or '[not sent]')
-        end
-    end)
-    vim.fn.prompt_setinterrupt(buf, stop)
+    -- <CR> takes the draft itself, so Neovim never commits it: every user
+    -- message is written when it is sent.
     vim.keymap.set('i', '<CR>', function()
-        local text = view:draft()
-        local gate = can_submit(c, text)
-        if not gate then
-            return
-        elseif (gate == 'queue' or gate == 'later') and occupied(c) then
-            -- Not committed: a queued prompt enters the transcript when sent.
-            if submit_draft(c, text, false) then
-                view:set_draft('')
-            end
+        if vim.fn.pumvisible() == 1 and vim.fn.complete_info({ 'selected' }).selected ~= -1 then
+            vim.api.nvim_feedkeys(vim.keycode('<C-y>'), 'n', false)
             return
         end
-        local enter = vim.api.nvim_replace_termcodes('<CR>', true, false, true)
-        vim.api.nvim_feedkeys(enter, 'in', false)
+        local text = view:draft()
+        view:set_draft('')
+        enter(c, view, text)
     end, { buffer = buf, desc = 'Submit Boomer prompt' })
-    vim.keymap.set('n', '<C-c>', stop, { buffer = buf, desc = 'Cancel Boomer turn' })
-    -- Copilot tells users to press <S-Tab> to leave plan mode. The completion
-    -- menu keeps it; the picker waits for the expr mapping's textlock to end.
+    -- Keys such as <C-j> and <kEnter> commit the draft without the mapping.
+    vim.fn.prompt_setcallback(buf, function(text)
+        view:uncommit(text)
+        vim.schedule(function()
+            if view:valid() then
+                enter(c, view, text)
+            end
+        end)
+    end)
+    vim.fn.prompt_setinterrupt(buf, function()
+        cancel(c)
+    end)
+    vim.keymap.set('n', '<C-c>', function()
+        cancel(c)
+    end, { buffer = buf, desc = 'Cancel Boomer turn' })
+    -- Agents' own UIs switch modes with <S-Tab>. The completion menu keeps it;
+    -- the change waits for the expr mapping's textlock to end.
     vim.keymap.set({ 'i', 'n', 'x' }, '<S-Tab>', function()
         if vim.fn.pumvisible() == 1 then
             return '<C-p>'
         end
-        vim.schedule(M.mode)
+        vim.schedule(next_mode)
         return ''
-    end, { buffer = buf, expr = true, desc = 'Pick Boomer mode' })
+    end, { buffer = buf, expr = true, desc = 'Next Boomer mode' })
     -- Slash commands complete with <C-x><C-o>, and through 'complete' with
     -- <C-n> and 'autocomplete' (the omnifunc declines outside a command).
     vim.bo[buf].omnifunc = "v:lua.require'boomer'.omnifunc"
@@ -798,13 +626,15 @@ local function attach(c, view)
     })
 end
 
-local function new_view(c)
+-- A fresh buffer for the chat, with `draft` carried over from the last one.
+local function new_view(c, draft)
     c.view = require('boomer.view').new({
         winbar = config.options.winbar ~= false and "%{%v:lua.require'boomer'.winbar()%}",
         labels = { user = config.options.labels.prompt, agent = c.opts.label },
         window = config.options.window,
     })
     attach(c, c.view)
+    unshift(c.view, draft or '')
     status_mod.changed(c)
 end
 
@@ -850,7 +680,6 @@ end
 -- that switched) is confirmed in the transcript.
 local function load(c, id)
     c.loading, c.session, c.agent_commands = true, nil, {}
-    c.fetched = nil
     -- Pickers for the previous session are now stale.
     c.picks = (c.picks or 0) + 1
     update(c, session_fields)
@@ -863,7 +692,7 @@ local function load(c, id)
         c.loading, c.announce = false, nil
         if err then
             report(c, err.message)
-            status(c, 'failed')
+            status(c, 'no session')
             restore(c)
             return
         end
@@ -883,11 +712,11 @@ local function load(c, id)
     end
 end
 
--- Swap a fresh buffer into the chat's windows and wipe the old one. The
--- client stays; only its current session changes.
+-- Swap a fresh buffer, with the draft, into the chat's windows and wipe the
+-- old one. The client stays; only its current session changes.
 local function switch(c, id)
     local old = c.view
-    new_view(c)
+    new_view(c, old:draft())
     place(c, vim.fn.win_findbuf(old.buf))
     vim.api.nvim_buf_delete(old.buf, { force = true })
     c.announce = 'session'
@@ -895,17 +724,17 @@ local function switch(c, id)
 end
 
 -- Focus the chat and confirm that what a command selects, `what`, is already
--- active. `line` is shown first unless `shown`.
-local function already(c, line, shown, what)
-    echo_command(c, line, shown)
+-- active.
+local function already(c, line, what)
+    echo(c, line)
     c.view:open()
     c.view:write('[' .. what .. ' (current)]')
 end
 
 -- Pick a saved session. fresh: the chat has no session yet, so dismissing the
 -- picker starts a new one. A picker that closes silently leaves it without
--- one; /new and /resume still work. `shown`: the command is in the transcript.
-local function choose(c, fresh, shown)
+-- one; /new and /resume still work.
+local function choose(c, fresh)
     local function dismiss(msg)
         if msg then
             warn(msg, c)
@@ -941,7 +770,7 @@ local function choose(c, fresh, shown)
             elseif fresh then
                 load(c, item.id)
             elseif item.id == c.session then
-                already(c, '/resume ' .. item.id, shown, 'Session: ' .. session_name(c))
+                already(c, '/resume ' .. item.id, 'Session: ' .. session_name(c))
             elseif check(c, 'switch') then
                 switch(c, item.id)
             end
@@ -951,7 +780,7 @@ end
 
 -- Start a chat. o.agent: profile name (default agent when nil); o.pick: choose
 -- a saved session; o.id: load that session; o.wins: windows to show it in;
--- o.announce: confirm it once ready (see load()).
+-- o.draft: initial draft; o.announce: confirm it once ready (see load()).
 local function start(o)
     local profile, perr = config.resolve(o.agent)
     if not profile then
@@ -968,7 +797,7 @@ local function start(o)
         state = { agent = profile.name, protocol = profile.protocol, cwd = profile.cwd },
     }
     chat = c
-    new_view(c)
+    new_view(c, o.draft)
     status(c, 'starting')
     place(c, o.wins)
     ---@type boomer.Callbacks
@@ -989,7 +818,7 @@ local function start(o)
         exit = function(msg)
             report(c, msg)
             c.dead, c.loading, c.queue = true, false, {}
-            status(c, 'closed')
+            status(c, 'exited')
             restore(c)
         end,
         status = function(fields)
@@ -1022,20 +851,36 @@ local function start(o)
     return c
 end
 
--- Public API (see :help boomer-lua) -------------------------------------------
---
--- Command functions return true when they ran (or started running), and
--- nil after warning otherwise. One that runs writes its result into the
--- transcript, after its line (`/usage`) unless that was typed there; /new,
--- /resume and /agent write theirs in the new buffer once it is ready.
+-- Start a chat in place of `c`, in its windows and with its draft; or the
+-- first one.
+local function restart(c, o)
+    if not c then
+        return start(o)
+    end
+    local old = c.view.buf
+    o.wins, o.draft = vim.fn.win_findbuf(old), c.view:draft()
+    close(c)
+    start(o)
+    vim.api.nvim_buf_delete(old, { force = true })
+end
 
--- Open or focus the chat, starting one if needed; shows a permission request
--- again if its picker was closed without an answer. Returns the chat buffer.
+-- Public API (see :help boomer-api) --------------------------------------------
+--
+-- Command functions return true when they ran (or started running), and nil
+-- after warning otherwise. One that runs shows its line as the user's
+-- message, then its result; /new, /resume and /agent write their result in
+-- the new buffer once it is ready.
+
+-- Open or focus the chat, starting one if needed, or restarting an agent that
+-- exited; shows a permission request again if its picker was closed without
+-- an answer. Returns the chat buffer.
 ---@return integer?
 function M.open()
-    if chat then
-        chat.view:open()
+    if chat and chat.dead then
+        restart(chat, { agent = chat.opts.name })
+    elseif chat then
         local req = pending(chat)
+        chat.view:open()
         if req then
             show(chat, req)
             return chat.view.buf
@@ -1043,183 +888,98 @@ function M.open()
     else
         start({})
     end
-    if chat and vim.api.nvim_get_current_buf() == chat.view.buf then
-        insert(vim.api.nvim_get_current_win())
+    if not chat then
+        return nil
     end
-    return chat and chat.view.buf
+    chat.view:open()
+    insert(vim.api.nvim_get_current_win())
+    return chat.view.buf
 end
 
 -- Settings ----------------------------------------------------------------------
 --
--- /model, /effort, /mode, /permissions and /settings resolve their argument
--- first, picking what is missing, into a complete line such as
--- `/model gpt-5` or `/settings verbose true`. dispatch() runs that line now,
--- or queues it during a turn; exec then applies it.
+-- /model, /effort, /mode and /permissions change the setting at once, also
+-- during a turn (Codex applies it from its next turn). Without such a setting,
+-- the line goes to the agent's own command of that name, if it has one.
 
-local nouns = { model = 'model', effort = 'reasoning effort', mode = 'mode' }
+local nouns =
+    { model = 'model', effort = 'reasoning effort', mode = 'mode', permissions = 'permissions' }
 
--- The session's settings: cb(err, list). local_only: use what the client
--- knows without asking the agent (permission presets).
-local function settings_of(c, local_only, cb)
-    if local_only then
-        return cb(nil, c.client:setting_list())
-    end
-    c.client:settings(function(err, list)
-        if not (c.closed or c.dead) then
-            cb(err and err.message, list)
+-- The session's setting for command `name`, if it has choices.
+local function setting_of(c, name)
+    local s = util.find(c.client:settings(), util.categories[name])
+    return s and #s.choices > 0 and s or nil
+end
+
+-- Show `/{name} {choice}` and change the setting.
+local function apply(c, name, setting, choice)
+    echo(c, '/' .. name .. ' ' .. util.argument(choice))
+    local view = c.view
+    c.client:configure(setting.id, choice.value, function(err)
+        if c.closed or c.dead or c.view ~= view then
+            return
+        elseif err then
+            report(c, err.message)
+        else
+            c.view:write('[Setting: ' .. name .. ' = ' .. choice.label .. ']')
         end
     end)
 end
 
--- The setting a command names, and the value given for it: `name` is a
--- util.categories key, or `settings` with arg `{id} [{value}]`. nil and the
--- reason if there is none.
-local function find_setting(list, name, arg)
-    if name ~= 'settings' then
-        local s = util.find(list, util.categories[name])
-        if not s or #s.choices == 0 then
-            return nil, nil, 'This agent offers no ' .. (nouns[name] or name) .. ' setting'
-        end
-        return s, arg ~= '' and arg or nil
-    end
-    local id, value = arg:match('^(%S+)%s*(.-)$')
-    for _, s in ipairs(list) do
-        if s.id == id and #s.choices > 0 then
-            return s, value ~= '' and value or nil
-        end
-    end
-    return nil, nil, 'Unknown setting: ' .. tostring(id)
-end
-
--- The setting's choice for `value`, or nil and the reason.
-local function find_choice(name, setting, value)
-    local choice = util.choice(setting, value)
-    if not choice then
-        return nil, 'Unknown ' .. (nouns[name] or setting.id) .. ': ' .. value
-    end
-    return choice
-end
-
--- The line that selects `choice`, such as `/model gpt-5`: shown while queued
--- and put back into the draft. Settings without a command of their own, or
--- whose command a user command replaces, use `/settings {id} {value}`.
-local function setting_line(setting, choice)
-    for key, category in pairs(util.categories) do
-        if setting.category == category and config.options.commands[key] == nil then
-            return '/' .. key .. ' ' .. util.argument(choice)
-        end
-    end
-    return '/settings ' .. setting.id .. ' ' .. util.argument(choice)
-end
-
--- How a setting is named when it changes: by its command (`effort`), or by
--- its label if it has none.
-local function setting_name(setting)
-    for key, category in pairs(util.categories) do
-        if setting.category == category then
-            return key
-        end
-    end
-    return setting.label
-end
-
-for _, name in ipairs({ 'model', 'effort', 'mode', 'permissions', 'settings' }) do
-    exec[name] = function(c, arg, done)
-        settings_of(c, name == 'permissions', function(err, list)
-            if err then
-                return done(err)
-            end
-            local setting, value, msg = find_setting(list, name, arg)
-            local choice
-            if setting then
-                choice, msg = find_choice(name, setting, value or '')
-            end
-            if not choice then
-                return done(msg)
-            end
-            c.client:configure(setting.id, choice.value, function(e)
-                if not e and not c.closed then
-                    c.view:write(
-                        '[Setting: ' .. setting_name(setting) .. ' = ' .. choice.label .. ']'
-                    )
-                end
-                done(e and e.message)
-            end)
-        end)
-    end
-end
-
--- Resolve `/{name} [{arg}]` into a complete line, picking what is missing,
--- and dispatch it. Errors in what was typed are warnings.
-local function choose_setting(name, arg)
+-- Set the setting of command `name` to `value`, or pick it.
+local function choose_setting(name, value)
     local c = chat
-    if not check(c, 'later') then
+    if not check(c, 'session') then
         return
     end
-    local shown = committed
-    settings_of(c, name == 'permissions', function(err, list)
-        if err then
-            return report(c, err)
+    local s = setting_of(c, name)
+    if not s then
+        if not c.agent_commands[name] then
+            return warn('This agent offers no ' .. nouns[name] .. ' setting', c)
         end
-        local function chosen(setting, choice)
-            -- The session may have been lost while a picker was open.
-            if check(c, 'later') then
-                dispatch(c, setting_line(setting, choice), shown)
-            end
-        end
-        local function pick_choice(setting)
-            pick(c, setting.choices, {
-                prompt = 'Boomer ' .. (nouns[name] or setting.id) .. ':',
-                format_item = function(item)
-                    return item.label .. (item.value == setting.current and ' [current]' or '')
-                end,
-            }, function(choice, e)
-                if e then
-                    report(c, e)
-                elseif choice then
-                    chosen(setting, choice)
-                end
-            end)
-        end
-        if name == 'settings' and not arg then
-            local settings = {}
-            for _, s in ipairs(list) do
-                if #s.choices > 0 then
-                    local current = s.current ~= nil and (' | ' .. tostring(s.current)) or ''
-                    settings[#settings + 1] =
-                        vim.tbl_extend('force', s, { label = s.label .. current })
-                end
-            end
-            if #settings == 0 then
-                return warn('This session advertises no selectable settings', c)
-            end
-            return pick(c, settings, { prompt = 'Boomer setting:' }, function(setting, e)
-                if e then
-                    report(c, e)
-                elseif setting then
-                    pick_choice(setting)
-                end
-            end)
-        end
-        local setting, value, msg = find_setting(list, name, arg or '')
-        if not setting then
-            return warn(msg, c)
-        elseif not value then
-            return pick_choice(setting)
-        end
-        local choice, why = find_choice(name, setting, value)
+        local line = '/' .. name .. (value and (' ' .. value) or '')
+        submit(c, line, line)
+        return true
+    elseif value then
+        local choice = util.choice(s, value)
         if not choice then
-            return warn(why, c)
+            return warn('Unknown ' .. nouns[name] .. ': ' .. value, c)
         end
-        chosen(setting, choice)
+        apply(c, name, s, choice)
+        return true
+    end
+    pick(c, s.choices, {
+        prompt = 'Boomer ' .. nouns[name] .. ':',
+        format_item = function(item)
+            return item.label .. (item.value == s.current and ' [current]' or '')
+        end,
+    }, function(choice, err)
+        if err then
+            report(c, err)
+        elseif choice and check(c, 'session') then
+            apply(c, name, s, choice)
+        end
     end)
     return true
 end
 
--- Pick a setting, then its value; `{id} [{value}]` names them.
----@param arg? string
-function M.settings(arg)
-    return choose_setting('settings', arg)
+-- <S-Tab>: switch to the mode after the current one.
+function next_mode()
+    local c = chat
+    if not check(c, 'session') then
+        return
+    end
+    local s = setting_of(c, 'mode')
+    if not s then
+        return warn('This agent offers no mode setting', c)
+    end
+    local i = 1
+    for j, choice in ipairs(s.choices) do
+        if choice.value == s.current then
+            i = j
+        end
+    end
+    apply(c, 'mode', s, s.choices[i % #s.choices + 1])
 end
 
 ---@param value? string Model ID or name; picks when nil.
@@ -1232,43 +992,15 @@ function M.effort(value)
     return choose_setting('effort', value)
 end
 
--- The only way out of an ACP agent's plan mode: Copilot does not let the
--- model leave it.
+-- The only way out of Copilot's plan mode: the model cannot leave it.
 ---@param value? string Mode ID or name; picks when nil.
 function M.mode(value)
     return choose_setting('mode', value)
 end
 
--- Prefer the agent's own command (ACP agents may advertise one), sent or
--- queued as a prompt. Without a value, pick one of the choices in its hint
--- (Copilot: `allow-all`, ...).
 ---@param value? string
 function M.permissions(value)
-    local c = chat
-    local agent_cmd = c and c.agent_commands.permissions
-    if not agent_cmd then
-        return choose_setting('permissions', value)
-    elseif not check(c, 'later') then
-        return
-    end
-    local values = not value and commands.hint_values(agent_cmd.hint) or {}
-    if #values == 0 then
-        local line = '/permissions' .. (value and (' ' .. value) or '')
-        submit(c, line, line, committed)
-        return true
-    end
-    pick(c, values, {
-        prompt = 'Boomer permissions:',
-        format_item = tostring,
-    }, function(choice, err)
-        if err then
-            report(c, err)
-        elseif choice and check(c, 'later') then
-            local line = '/permissions ' .. choice
-            submit(c, line, line, false)
-        end
-    end)
-    return true
+    return choose_setting('permissions', value)
 end
 
 -- Sessions and agents ------------------------------------------------------------
@@ -1277,14 +1009,14 @@ end
 ---@param id? string
 function M.resume(id)
     local c = chat
-    if not check(c, 'switch', typed) then
+    if not check(c, 'switch') then
         return
-    elseif not c then
-        start({ pick = not id, id = id, announce = 'session' })
+    elseif not c or c.dead then
+        restart(c, { agent = c and c.opts.name, pick = not id, id = id, announce = 'session' })
     elseif not id then
-        choose(c, false, committed)
+        choose(c, false)
     elseif id == c.session then
-        already(c, '/resume ' .. id, committed, 'Session: ' .. session_name(c))
+        already(c, '/resume ' .. id, 'Session: ' .. session_name(c))
     else
         switch(c, id)
     end
@@ -1293,21 +1025,23 @@ end
 
 -- Start a new session with the same agent.
 function M.new()
-    if not check(chat, 'switch', typed) then
+    local c = chat
+    if not check(c, 'switch') then
         return
-    elseif not chat then
-        start({ announce = 'session' })
+    elseif not c or c.dead then
+        restart(c, { agent = c and c.opts.name, announce = 'session' })
     else
-        switch(chat)
+        switch(c)
     end
     return true
 end
 
 -- Replace the chat with one for another agent profile, in the same windows,
--- or pick the agent. `shown`: the command is in the transcript.
-local function agent(name, shown)
+-- or pick the agent.
+---@param name? string
+function M.agent(name)
     local c = chat
-    if not check(c, 'agent', typed) then
+    if not check(c, 'switch') then
         return
     elseif not name then
         local current = c and c.opts.name
@@ -1323,7 +1057,7 @@ local function agent(name, shown)
         }
         local function chosen(choice)
             if choice and chat == c then
-                agent(choice, shown)
+                M.agent(choice)
             end
         end
         local names = config.installed_agent_names(current)
@@ -1336,24 +1070,11 @@ local function agent(name, shown)
     elseif not config.options.agents[name] then
         return warn('Unknown agent: ' .. name)
     elseif c and c.opts.name == name and not c.dead then
-        already(c, '/agent ' .. name, shown, 'Agent: ' .. name)
+        already(c, '/agent ' .. name, 'Agent: ' .. name)
         return true
     end
-    if c then
-        local old = c.view.buf
-        local wins = vim.fn.win_findbuf(old)
-        close(c)
-        start({ agent = name, wins = wins, announce = 'agent' })
-        vim.api.nvim_buf_delete(old, { force = true })
-    else
-        start({ agent = name, announce = 'agent' })
-    end
+    restart(c, { agent = name, announce = 'agent' })
     return true
-end
-
----@param name? string
-function M.agent(name)
-    return agent(name, committed)
 end
 
 -- Write context, token, cost and rate-limit usage into the chat. Agents with
@@ -1363,7 +1084,7 @@ function M.usage()
     if not check(c, 'session') then
         return
     end
-    echo_command(c, '/usage', committed)
+    echo(c, '/usage')
     local view = c.view
     local function write()
         if not c.closed and c.view == view then
@@ -1378,43 +1099,39 @@ function M.usage()
     return true
 end
 
--- Compact the conversation, now or after the running turn. Prefers the
--- agent's own command (it may take focus instructions), else native
--- compaction.
+-- Compact the conversation natively (as a turn, so only between turns), or
+-- through the agent's own command, which also takes focus instructions.
 ---@param focus? string
 function M.compact(focus)
     local c = chat
-    if not check(c, 'later') then
+    if not check(c, 'session') then
         return
+    elseif c.client.compact and not focus then
+        if not check(c, 'idle') then
+            return
+        end
+        echo(c, '/compact')
+        turn(c, function(cb)
+            c.client:compact(cb)
+        end, 'compacted')
     elseif c.agent_commands.compact then
         local line = '/compact' .. (focus and (' ' .. focus) or '')
-        submit(c, line, line, committed)
-    elseif not c.client.compact then
-        return warn('This agent cannot compact the conversation', c)
-    elseif focus then
+        submit(c, line, line)
+    elseif c.client.compact then
         return warn('This agent takes no compaction instructions', c)
     else
-        dispatch(c, '/compact', committed)
+        return warn('This agent cannot compact the conversation', c)
     end
     return true
-end
-
--- Native compaction runs as a turn, which holds the queue until it ends.
-function exec.compact(c, _, done)
-    turn(c, function(cb)
-        c.client:compact(cb)
-    end, 'compacted')
-    done()
 end
 
 -- List the commands in the chat, or open the help without one.
 function M.help()
     local c = chat
-    local lines = commands.help(
-        commands.list(config.options.commands, c and c.agent_commands or {}, c ~= nil)
-    )
+    local lines =
+        commands.help(commands.list(config.options.commands, c and c.agent_commands or {}))
     if c then
-        echo_command(c, '/help', committed)
+        echo(c, '/help')
         c.view:write(table.concat(lines, '\n'))
     elseif not pcall(vim.cmd.help, 'boomer-commands') then
         vim.notify(table.concat(lines, '\n'), vim.log.levels.INFO, { title = 'Boomer' })
@@ -1422,24 +1139,14 @@ function M.help()
     return true
 end
 
--- Cancel the running turn and discard the queued prompts and commands (CTRL-C
--- returns them to the draft instead, see stop()).
+-- Cancel the running turn; queued prompts return to the draft (like CTRL-C).
 function M.cancel()
     local c = chat
-    local n = c and #c.prompts or 0
-    if n == 0 and not (c and c.busy) then
+    if not c or #c.prompts == 0 and not c.busy then
         return warn('Nothing to cancel', c)
     end
-    echo_command(c, '/cancel', committed)
-    if n > 0 then
-        c.prompts = {}
-        sync_queue(c)
-        c.view:write(('[cancelled %d queued]'):format(n))
-    end
-    if c.busy then
-        interrupt(c)
-    end
-    return true
+    echo(c, '/cancel')
+    return cancel(c)
 end
 
 -- Stop the agent and wipe the chat buffer.
@@ -1451,6 +1158,7 @@ function M.close()
             vim.api.nvim_buf_delete(c.view.buf, { force = true })
         end
     end
+    return true
 end
 
 -- Run a command line such as "model gpt-5" or "/usage", as typed after
@@ -1462,7 +1170,7 @@ function M.run(line)
         return M.open() and true
     end
     local name, args = line:match('^/?(%S+)%s*(.-)%s*$')
-    return run_command(chat, name, args, false)
+    return run_command(chat, name, args)
 end
 
 -- A copy of the chat status, with the chat buffer (nil without a chat).
@@ -1505,7 +1213,7 @@ end
 -- Completion items for commands typed in the prompt.
 local function command_items(c, base)
     local items = {}
-    for _, item in ipairs(commands.list(config.options.commands, c.agent_commands, true)) do
+    for _, item in ipairs(commands.list(config.options.commands, c.agent_commands)) do
         local word = '/' .. item.name
         if vim.startswith(word, base) then
             items[#items + 1] = {
@@ -1519,88 +1227,44 @@ local function command_items(c, base)
     return items
 end
 
--- Fetch, once, what argument completion lacks: the settings (Codex lists its
--- models on demand) or the saved sessions. again() runs if values arrived.
-local function fetch(c, what, again)
-    c.fetched = c.fetched or {}
-    if c.fetched[what] or not c.session or c.dead or c.closed then
-        return
-    end
-    c.fetched[what] = true
-    local function done(found)
-        if found then
-            vim.schedule(function()
-                if chat == c and not c.dead and not c.closed then
-                    again()
-                end
-            end)
-        end
-    end
-    if what == 'session' then
-        c.client:list_sessions(c.opts.cwd, function(err, items)
-            if not err then
-                c.sessions = items
-            end
-            done(not err and #items > 0)
-        end)
-    else
-        c.client:settings(function(err, list)
-            local s = not err and util.find(list, util.categories[what])
-            done(s and #s.choices > 0)
-        end)
-    end
-end
-
--- Values for a command's argument. Completion must not block on the agent:
--- what the client does not know yet is fetched in the background, and
--- again() runs when it arrived.
-local function arg_candidates(name, again)
+-- Values for a command's argument: setting choices, agent names, user
+-- `complete` lists, or the choices in an agent command's hint.
+local function arg_candidates(name)
     local c = chat
-    local item = commands.find(config.options.commands, c and c.agent_commands or {}, name, false)
+    local item = commands.find(config.options.commands, c and c.agent_commands or {}, name)
     if not item then
         return {}
     end
-    local spec, kind = item.spec, item.source == 'builtin' and item.spec.complete
-    local agent_cmd = c and c.agent_commands[name]
-    if agent_cmd and (item.source == 'agent' or spec.defer) then
-        local values = commands.hint_values(agent_cmd.hint)
-        if #values > 0 or item.source == 'agent' then
-            return values
-        end
-    end
-    if item.source == 'user' and spec.complete then
+    local spec = item.spec
+    if item.source == 'agent' then
+        return commands.hint_values(spec.hint)
+    elseif item.source == 'user' then
         if type(spec.complete) == 'function' then
             local ok, list = pcall(spec.complete, c and M.status())
             return ok and type(list) == 'table' and list or {}
         end
-        return spec.complete
-    elseif kind == 'agent' then
+        return spec.complete or {}
+    elseif name == 'agent' then
         return config.installed_agent_names(c and c.opts.name)
-    elseif kind == 'session' then
-        if c and not c.sessions then
-            fetch(c, 'session', again)
-        end
-        return vim.tbl_map(function(s)
-            return s.id
-        end, c and c.sessions or {})
-    elseif kind and util.categories[kind] and c and c.client and not c.dead then
-        local s = util.find(c.client:setting_list(), util.categories[kind])
-        if not s or #s.choices == 0 then
-            fetch(c, kind, again)
-        end
-        -- Copilot's mode IDs are URIs; their names are what anyone types.
-        -- It also lists some models twice.
-        local out, seen = {}, {}
-        for _, choice in ipairs(s and s.choices or {}) do
-            local value = util.argument(choice)
-            if not seen[value] then
-                seen[value] = true
-                out[#out + 1] = value
-            end
-        end
-        return out
+    elseif not util.categories[name] or not c or c.dead or not c.client then
+        return {}
     end
-    return {}
+    local s = setting_of(c, name)
+    if not s then
+        local agent_cmd = c.agent_commands[name]
+        return agent_cmd and commands.hint_values(agent_cmd.hint) or {}
+    end
+    -- Copilot's mode IDs are URIs; their names are what anyone types. It also
+    -- lists some models twice.
+    local out, seen = {}, {}
+    for _, choice in ipairs(s.choices) do
+        local value = util.argument(choice)
+        if not seen[value] then
+            seen[value] = true
+            out[#out + 1] = value
+        end
+    end
+    return out
 end
 
 local function prefixed(list, lead)
@@ -1616,22 +1280,10 @@ function M.complete(lead, cmdline, pos)
     if not name then
         local names = vim.tbl_map(function(item)
             return item.name
-        end, commands.list(
-            config.options.commands,
-            chat and chat.agent_commands or {},
-            false
-        ))
+        end, commands.list(config.options.commands, chat and chat.agent_commands or {}))
         return prefixed(names, lead)
     end
-    return prefixed(
-        arg_candidates(name, function()
-            -- Show the values that arrived, if still completing.
-            if vim.fn.getcmdtype() == ':' and vim.fn.exists('*wildtrigger') == 1 then
-                pcall(vim.fn.wildtrigger)
-            end
-        end),
-        lead
-    )
+    return prefixed(arg_candidates(name), lead)
 end
 
 -- 'omnifunc' for the chat buffer: a command name at the start of the draft,
@@ -1662,27 +1314,9 @@ function M.omnifunc(findstart, base)
         return -3
     end
     if completing then
-        local name = completing
         return vim.tbl_map(function(s)
             return { word = s }
-        end, prefixed(
-            arg_candidates(name, function()
-                -- Show the values that arrived if the argument is still
-                -- being typed.
-                if
-                    vim.api.nvim_get_mode().mode:sub(1, 1) ~= 'i'
-                    or M.omnifunc(1, '') < 0
-                    or completing ~= name
-                then
-                    return
-                end
-                local start = M.omnifunc(1, '')
-                local col = vim.api.nvim_win_get_cursor(0)[2]
-                local typed = vim.api.nvim_get_current_line():sub(start + 1, col)
-                vim.fn.complete(start + 1, M.omnifunc(0, typed))
-            end),
-            base
-        ))
+        end, prefixed(arg_candidates(completing), base))
     end
     return command_items(c, base)
 end

@@ -119,7 +119,7 @@ local function check_command(name, spec)
     end
     check(where, spec, {
         desc = 'string',
-        prompt = { 'string', 'function' },
+        prompt = 'string',
         run = 'function',
         complete = { 'table', 'function' },
     })

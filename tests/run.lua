@@ -30,14 +30,9 @@ for name in pairs(require('boomer.config').options.agents) do
     end
 end
 
-local notices, progress, last = {}, {}, nil
+local notices, last = {}, nil
 vim.notify = function(msg)
     notices[#notices + 1] = msg
-end
--- Progress messages would print to stdout in headless mode.
-api.nvim_echo = function(chunks, _, opts)
-    progress[#progress + 1] = { status = opts.status, msg = chunks[1][1] }
-    return #progress
 end
 local start = Rpc.start
 Rpc.start = function(opts)
@@ -201,6 +196,8 @@ local function finish(code)
     vim.cmd('silent! only')
 end
 
+-- Whether `row` has an extmark whose `field` is `group`. A highlight must
+-- cover some text: one collapsed by a line rewrite does not count.
 local function marks(buf, row, field, group)
     for _, m in
         ipairs(api.nvim_buf_get_extmarks(buf, -1, { row, 0 }, { row, -1 }, {
@@ -208,7 +205,9 @@ local function marks(buf, row, field, group)
             overlap = true,
         }))
     do
-        if m[4][field] == group then
+        local d = m[4]
+        local empty = field == 'hl_group' and d.end_row == m[2] and d.end_col <= m[3]
+        if d[field] == group and not empty then
             return true
         end
     end
@@ -264,6 +263,16 @@ local function pick(label)
     end
 end
 
+-- A view as the chat creates it, with the configured labels and window.
+local function new_view(opts)
+    opts = opts or {}
+    local options = require('boomer.config').options
+    return require('boomer.view').new({
+        labels = opts.labels or { user = options.labels.prompt, agent = options.labels.agent },
+        window = vim.tbl_deep_extend('force', options.window, opts.window or {}),
+    })
+end
+
 local tests = {}
 local function test(name, fn)
     tests[#tests + 1] = { name = name, fn = fn }
@@ -281,6 +290,7 @@ test('commands', function()
     assert(not pcall(boomer.setup, { agents = { codex = { bogus = 1 } } }))
     assert(not pcall(boomer.setup, { commands = { x = { desc = 'no action' } } }))
     assert(not pcall(boomer.setup, { commands = { x = { prompt = 'a', run = print } } }))
+    assert(not pcall(boomer.setup, { commands = { x = { prompt = print } } }), 'prompt function')
     assert(not pcall(boomer.setup, { commands = { ['a b'] = { prompt = 'a' } } }))
     assert(not pcall(boomer.setup, { winbar = 'x' }))
     assert(not pcall(boomer.setup, { winbar = { items = { 'agent' } } }), 'table winbar')
@@ -355,23 +365,17 @@ test('slash command parsing', function()
     assert(commands.parse('/ x') == nil and commands.parse('/a/b') == nil)
     assert(commands.parse('/review\nmore').name == 'review')
     local spec = { prompt = 'Check $ARGUMENTS now' }
-    assert(commands.expand(spec, 'a.lua', {}) == 'Check a.lua now')
-    assert(commands.expand({ prompt = 'Base' }, 'extra', {}) == 'Base\n\nextra')
-    assert(commands.expand({ prompt = 'Base' }, '', {}) == 'Base')
-    assert(commands.expand({
-        prompt = function(args)
-            return args:upper()
-        end,
-    }, 'x', {}) == 'X')
+    assert(commands.expand(spec, 'a.lua') == 'Check a.lua now')
+    assert(commands.expand({ prompt = 'Base' }, 'extra') == 'Base\n\nextra')
+    assert(commands.expand({ prompt = 'Base' }, '') == 'Base')
     local list = commands.list({ help = false, zed = { prompt = 'z', desc = 'Zed' } }, {
         plan = { name = 'plan', desc = 'Plan it' },
         zed = { name = 'zed' },
-    }, true)
+    })
     local names = vim.tbl_map(function(i)
         return i.source .. ':' .. i.name
     end, list)
     assert(not vim.tbl_contains(names, 'builtin:help'), 'disabled builtin')
-    assert(not vim.tbl_contains(names, 'builtin:close'), 'ex-only hidden in prompt')
     assert(vim.tbl_contains(names, 'user:zed') and not vim.tbl_contains(names, 'agent:zed'))
     assert(names[#names] == 'agent:plan', vim.inspect(names))
     assert(names[1] == 'builtin:agent', vim.inspect(names))
@@ -401,8 +405,8 @@ test('status rendering', function()
     rendered = api.nvim_eval_statusline(bar, { use_winbar = true, maxwidth = 20 }).str
     assert(rendered:find('^Boomer <.*0%.50 USD$') and #rendered == 20, rendered)
     assert(
-        st.text({ agent = 'x', state = 'failed', context = { used = 1500 } })
-            == 'x | failed | ctx 1.5k'
+        st.text({ agent = 'x', state = 'exited', context = { used = 1500 } })
+            == 'x | exited | ctx 1.5k'
     )
     -- Rate limits; a nearly used-up window is highlighted.
     local limited = {
@@ -424,9 +428,9 @@ test('status rendering', function()
     local usage = table.concat(st.usage(s), '\n')
     assert(usage:find('Context: 42.0k of 100.0k tokens (42%)', 1, true), usage)
     assert(usage:find('Cost: 0.50 USD', 1, true), usage)
-    s.tokens, s.protocol = { total = 12345, input = 12000, output = 345 }, 'acp'
+    s.tokens = { total = 12345, input = 12000, output = 345 }
     usage = table.concat(st.usage(s), '\n')
-    assert(usage:find('Last turn: 12.3k (12.0k in, 345 out)', 1, true), usage)
+    assert(usage:find('Tokens: 12.3k (12.0k in, 345 out)', 1, true), usage)
     assert(st.usage({ agent = 'x' })[2] == 'No usage reported yet')
 end)
 
@@ -448,8 +452,7 @@ test('health', function()
 end)
 
 test('view rendering', function()
-    local View = require('boomer.view')
-    local view = View.new()
+    local view = new_view()
     local buf = view.buf
     vim.wo.conceallevel = 2
     view:open()
@@ -500,17 +503,23 @@ test('view rendering', function()
     local draft_row = row_of(buf, 'Prompt: draft')
     assert(blank(buf) == draft_row, 'no blank line above the prompt')
 
-    -- Submitted input stays as typed: it is already a user message.
+    -- A draft Neovim commits itself (keys that bypass the <CR> mapping) is
+    -- taken back out; the message written for it starts a block of its own.
     local first = row_of(buf, 'Prompt: draft')
+    local committed
     vim.fn.prompt_setcallback(buf, function(s)
-        view:submitted(s)
+        committed = s
+        view:uncommit(s)
     end)
     keys('A<CR><Esc>')
-    assert(has(buf, 'Agent:\nhello\nPrompt: draft\nsecond\nPrompt: '), text(buf))
-    assert(marks(buf, first, 'hl_group', 'BoomerUserLabel'))
+    assert(committed == 'draft\nsecond', tostring(committed))
+    assert(view:row() == first and view:draft() == '', text(buf))
+    view:message('user', committed, 'u2')
+    assert(has(buf, 'Agent:\nhello\n\nPrompt: draft\nsecond\nPrompt: '), text(buf))
+    assert(marks(buf, first + 1, 'hl_group', 'BoomerUserLabel'))
     local row, col = view:row()
-    assert(row == first + 2 and col == #'Prompt: ', 'input mark moved')
-    assert(blank(buf) == row, 'blank line did not follow the prompt')
+    assert(row == first + 3 and col == #'Prompt: ', 'input mark moved')
+    assert(blank(buf) == row, 'blank line did not follow the message')
     assert(marks(buf, row, 'hl_group', 'BoomerUserLabel'), 'label not on the new prompt')
 
     api.nvim_set_hl(0, 'BoomerUserLabel', { fg = '#234567' })
@@ -522,7 +531,7 @@ test('view rendering', function()
     api.nvim_buf_delete(buf, { force = true })
 
     -- Custom labels; trailing space on the user label is not doubled.
-    view = View.new({ labels = { user = 'Me> ', agent = 'Bot:' } })
+    view = new_view({ labels = { user = 'Me> ', agent = 'Bot:' } })
     view:message('agent', 'hi')
     view:message('user', 'yo')
     assert(text(view.buf) == 'Bot:\nhi\n\nMe> yo\nMe> ', text(view.buf))
@@ -531,13 +540,12 @@ test('view rendering', function()
 end)
 
 test('window layout', function()
-    local View = require('boomer.view')
     local columns, lines = vim.o.columns, vim.o.lines
     vim.o.columns, vim.o.lines = 120, 40
     local rows = vim.o.lines - vim.o.cmdheight
     local function show(window)
         vim.cmd('silent! only')
-        local view = View.new({ window = window })
+        local view = new_view({ window = window })
         view:open()
         local win = api.nvim_get_current_win()
         assert(api.nvim_win_get_buf(win) == view.buf)
@@ -550,7 +558,7 @@ test('window layout', function()
     -- Default: right split of half the editor, editor-wide even beside other splits.
     vim.cmd('silent! only')
     vim.cmd('split')
-    local view = View.new()
+    local view = new_view()
     view:open()
     local win = api.nvim_get_current_win()
     local layout = vim.fn.winlayout()
@@ -602,9 +610,9 @@ end)
 test('codex chat', function()
     -- A delayed multiline turn, then a second turn in the same session.
     local scenario = load('codex-basic')
-    local again = steps(scenario, 6)
-    scenario.steps[6].message.params.input[1].text = 'hello\nworld'
-    table.insert(scenario.steps, 9, { op = 'delay', ms = 150 })
+    local again = steps(scenario, 8)
+    scenario.steps[8].message.params.input[1].text = 'hello\nworld'
+    table.insert(scenario.steps, 11, { op = 'delay', ms = 150 })
     table.insert(scenario.steps, 2, { op = 'delay', ms = 60 })
     vim.list_extend(scenario.steps, again)
     local windows = #api.nvim_list_wins()
@@ -626,7 +634,6 @@ test('codex chat', function()
     enter(buf)
     assert(draft(buf) == ' \n ', 'empty prompt was sent')
     local row = row_of(buf, 'Prompt: hello')
-    assert(progress[#progress].status == 'running')
     assert(marks(buf, row, 'hl_group', 'BoomerUserLabel'))
     await(function()
         return has(buf, 'Agent:\nhello')
@@ -639,7 +646,6 @@ test('codex chat', function()
     turn(buf)
     assert(api.nvim_get_current_win() == code, 'streaming stole focus')
     assert(draft(buf) == 'keep\nthis', 'streaming overwrote the draft')
-    assert(progress[#progress].status == 'success')
     -- Warnings are written into the transcript; one ends a streamed reply.
     local busy = 'Warning: A turn is still active; wait or use /cancel\n\n'
     assert(
@@ -711,7 +717,7 @@ test('pickers return to insert mode', function()
         return startinsert(...)
     end)
     -- Like most pickers, leave Insert mode and answer later.
-    local answers = { 'Model', 'Two', 'Model' }
+    local answers = { 'Two' }
     vim.ui.select = function(items, opts, cb)
         log[#log + 1] = 'pick ' .. api.nvim_get_mode().mode
         vim.cmd.stopinsert()
@@ -723,93 +729,28 @@ test('pickers return to insert mode', function()
             end
         end, 10)
     end
-    -- /settings typed in Insert mode: back to Insert once the chained pickers end.
+    -- /model typed in Insert mode: back to Insert once answered.
     api.nvim_set_current_win(vim.fn.win_findbuf(buf)[1])
-    keys('A/settings<CR>', '!')
+    keys('A/model<CR>', '!')
     await(function()
-        return has(buf, '[Setting: model = Two]') and #log == 3
+        return has(buf, '[Setting: model = Two]') and #log == 2
     end, 'setting; log: ' .. vim.inspect(log))
-    assert(vim.deep_equal(log, { 'pick i', 'pick n', 'insert' }), vim.inspect(log))
-    -- Dismissed after the first picker.
+    assert(vim.deep_equal(log, { 'pick i', 'insert' }), vim.inspect(log))
+    -- Dismissed.
     log = {}
-    keys('A/settings<CR>', '!')
+    keys('A/model<CR>', '!')
     await(function()
-        return #log == 3
+        return #log == 2
     end, 'dismissal; log: ' .. vim.inspect(log))
-    assert(vim.deep_equal(log, { 'pick i', 'pick n', 'insert' }), vim.inspect(log))
+    assert(vim.deep_equal(log, { 'pick i', 'insert' }), vim.inspect(log))
     -- Opened from Normal mode: stays there.
     log = {}
     vim.cmd.stopinsert()
-    assert(boomer.settings())
+    assert(boomer.model())
     pause(50)
     assert(vim.deep_equal(log, { 'pick n' }), vim.inspect(log))
     rawset(vim.cmd, 'startinsert', nil)
     finish()
-end)
-
-test('pickers answering in terminal mode', function()
-    -- Mode changes need the main loop: drive a child Neovim. Its picker answers
-    -- in Terminal mode, which ends after the answer (like fzf-lua).
-    stage(load('acp-config'))
-    local child = vim.fn.jobstart({ vim.v.progpath, '--embed', '--headless', '--clean' }, {
-        rpc = true,
-    })
-    local function lua(code, ...)
-        return vim.rpcrequest(child, 'nvim_exec_lua', code, { ... })
-    end
-    local function mode()
-        return vim.rpcrequest(child, 'nvim_get_mode').mode
-    end
-    vim.rpcrequest(child, 'nvim_ui_attach', 80, 24, {})
-    lua(
-        [[
-        local root, fake = ...
-        vim.opt.rtp:prepend(root)
-        vim.cmd.runtime('plugin/boomer.lua')
-        require('boomer').setup({
-            agent = 'copilot',
-            agents = { copilot = { command = fake } },
-        })
-        vim.ui.select = function(items, _, cb)
-            local win = vim.api.nvim_open_win(vim.api.nvim_create_buf(false, true), true, {
-                relative = 'editor', row = 1, col = 1, width = 20, height = 3,
-            })
-            -- Any program that waits until it is stopped.
-            local job = vim.fn.jobstart({ vim.v.progpath, '--clean', '--headless' }, {
-                term = true,
-                on_exit = function()
-                    vim.api.nvim_win_close(win, true)
-                    cb(items[#items])
-                end,
-            })
-            vim.keymap.set('t', '<CR>', function()
-                vim.fn.jobstop(job)
-            end, { buffer = true })
-            vim.cmd.startinsert()
-        end
-        _G.buf = require('boomer').open()
-    ]],
-        root,
-        fake
-    )
-    local function ready()
-        return lua("return (require('boomer').status() or {}).state") == 'ready'
-    end
-    await(ready, 'child ready')
-    assert(mode() == 'i', mode())
-    vim.rpcrequest(child, 'nvim_input', '/model<CR>')
-    await(function()
-        return mode() == 't'
-    end, 'child picker')
-    vim.rpcrequest(child, 'nvim_input', '<CR>')
-    await(function()
-        local lines = lua('return vim.api.nvim_buf_get_lines(_G.buf, 0, -1, false)')
-        return vim.list_contains(lines, '[Setting: model = Two]') and ready()
-    end, 'child setting')
-    pause(50)
-    local m, ft = mode(), lua('return vim.bo.filetype')
-    vim.fn.jobstop(child)
-    assert(m == 'i' and ft == 'boomer', m .. ' ' .. ft)
 end)
 
 test('acp chat', function()
@@ -825,73 +766,49 @@ test('acp chat', function()
     buf = open(load('acp-final-exit'), 'copilot')
     send(buf)
     await(function()
-        return status(buf, 'closed')
+        return status(buf, 'exited')
     end, 'exit after final response')
     assert(has(buf, 'hello\n\n[completed]'), text(buf))
     assert(has(buf, 'Error: agent exited with code 0'), text(buf))
-    assert(not boomer.settings(), 'dead chat accepted a command')
+    assert(not boomer.model(), 'dead chat accepted a command')
+    assert(warned(buf, 'The agent has exited; :Boomer restarts it'), text(buf))
     finish()
 end)
 
 test('settings', function()
+    -- Codex stages settings for the next turn, also while one runs.
     local scenario = load('codex-basic')
-    local models = load('codex-models')
-    table.insert(scenario.steps, 6, models.steps[4])
-    table.insert(scenario.steps, 7, models.steps[5])
-    scenario.steps[8].message.params.model = 'm2'
-    scenario.steps[8].message.params.effort = 'high'
+    local again = steps(scenario, 8)
+    again[1].message.params.model = 'm2'
+    vim.list_extend(scenario.steps, again)
     local buf = open(scenario)
-    ready(buf)
-    local n = 0
-    vim.ui.select = function(items, opts, cb)
-        n = n + 1
-        local label = opts.format_item(items[1])
-        if n == 1 then
-            assert(label == 'Model | m1', label)
-        end
-        cb(items[(n == 2 or n == 3) and 2 or 1])
-    end
-    assert(boomer.settings())
-    await(function()
-        return has(buf, '[Setting: model =')
-    end, 'model')
-    assert(boomer.settings())
-    await(function()
-        return has(buf, '[Setting: effort = high]')
-    end, 'effort')
     send(buf)
+    assert(status(buf, 'running'))
+    vim.ui.select = function(items, opts, cb)
+        assert(opts.format_item(items[1]):find('[current]', 1, true), 'current not marked')
+        cb(items[2])
+    end
+    assert(boomer.model())
+    await(function()
+        return has(buf, 'Prompt: /model m2\n\n[Setting: model = ')
+    end, 'model during a turn')
     turn(buf)
+    send(buf)
+    turn(buf, 2)
+    assert(not boomer.effort('low'))
+    assert(warned(buf, 'Unknown reasoning effort: low'), text(buf))
     finish()
 
-    -- ACP: grouped choices and booleans keep native values.
+    -- ACP: grouped choices keep their group in the label.
     scenario = load('acp-config')
     local options = scenario.steps[4].message.result.configOptions
     options[1].options = { { name = 'Family', options = options[1].options } }
-    options[2] = { id = 'enabled', name = 'Enabled', type = 'boolean', currentValue = true }
-    local request, response = vim.deepcopy(scenario.steps[5]), vim.deepcopy(scenario.steps[6])
-    request.message.params.configId, request.message.params.value = 'enabled', false
-    response.message.result.configOptions = vim.deepcopy(options)
-    response.message.result.configOptions[2].currentValue = false
-    table.insert(scenario.steps, 5, request)
-    table.insert(scenario.steps, 6, response)
     buf = open(scenario, 'copilot')
     ready(buf)
-    -- A setting without a command of its own is named by /settings.
-    send(buf, '/settings nope false')
-    assert(warned(buf, 'Unknown setting: nope'), text(buf))
-    send(buf, '/settings enabled false')
+    vim.ui.select = pick('Family / Two')
+    assert(boomer.model())
     await(function()
-        return has(buf, 'Prompt: /settings enabled false\n\n[Setting: Enabled = false]')
-    end, 'boolean')
-    local choices = { 'Model', 'Family / Two' }
-    n = 0
-    vim.ui.select = function(items, opts, cb)
-        n = n + 1
-        pick(choices[n])(items, opts, cb)
-    end
-    assert(boomer.settings())
-    await(function()
-        return has(buf, '[Setting: model = Family / Two]')
+        return has(buf, 'Prompt: /model m2\n\n[Setting: model = Family / Two]')
     end, 'grouped')
     finish()
 
@@ -904,19 +821,20 @@ test('settings', function()
     vim.ui.select = function(_, _, cb)
         cb(nil)
     end
-    assert(boomer.settings())
+    assert(boomer.model())
     pause(20)
+    assert(not has(buf, '/model'), 'dismissed picker echoed')
     vim.ui.select = function()
         error('selector failed')
     end
-    assert(boomer.settings())
+    assert(boomer.model())
     await(function()
         return has(buf, 'selector failed')
     end, 'selector error')
     vim.ui.select = function(items, _, cb)
         cb(items[#items])
     end
-    assert(boomer.settings())
+    assert(boomer.model())
     await(function()
         return has(buf, 'Error: configuration refused')
     end, 'backend error')
@@ -928,10 +846,10 @@ test('settings', function()
             cb(items[1])
         end
     end
-    assert(boomer.settings())
+    assert(boomer.model())
     pause(20)
     local stale = late
-    assert(boomer.settings(), 'a silently closed picker blocks settings')
+    assert(boomer.model(), 'a silently closed picker blocks settings')
     pause(20)
     stale()
     pause(20)
@@ -939,6 +857,27 @@ test('settings', function()
     finish()
     late()
     pause(20)
+
+    -- A setting answered after /new opened another session changes nothing.
+    scenario = load('acp-config')
+    local base = vim.deepcopy(scenario.steps)
+    scenario.steps = { base[1], base[2], base[3], base[4], base[5], { op = 'delay', ms = 100 } }
+    vim.list_extend(scenario.steps, { base[6], base[3], vim.deepcopy(base[4]) })
+    scenario.steps[9].message.result.sessionId = 's2'
+    buf = open(scenario, 'copilot')
+    ready(buf)
+    assert(boomer.model('m2'))
+    pause(20)
+    assert(boomer.new())
+    local fresh
+    await(function()
+        fresh = api.nvim_get_current_buf()
+        return fresh ~= buf and status(fresh, 'ready') and state(fresh).session == 's2'
+    end, 'new session')
+    pause(50)
+    assert(not has(fresh, '[Setting:'), text(fresh))
+    assert(state(fresh).model == 'One', state(fresh).model)
+    finish()
 end)
 
 test('permissions', function()
@@ -977,8 +916,8 @@ test('permissions', function()
     -- A structured policy amendment is passed through unchanged.
     local scenario = load('codex-permission-accept')
     local decision = { acceptWithExecpolicyAmendment = { execpolicy_amendment = { 'echo' } } }
-    scenario.steps[8].message.params.availableDecisions = { 'decline', decision }
-    scenario.steps[9].message.result.decision = decision
+    scenario.steps[10].message.params.availableDecisions = { 'decline', decision }
+    scenario.steps[11].message.result.decision = decision
     vim.ui.select = pick('Policy change:')
     local buf = open(scenario)
     send(buf)
@@ -989,10 +928,10 @@ end)
 test('permission queue and cancel', function()
     -- Two simultaneous requests open one selector at a time.
     local scenario = load('codex-permission-accept')
-    local request, response = vim.deepcopy(scenario.steps[8]), vim.deepcopy(scenario.steps[9])
+    local request, response = vim.deepcopy(scenario.steps[10]), vim.deepcopy(scenario.steps[11])
     request.message.id, response.message.id = 'permission2', 'permission2'
-    table.insert(scenario.steps, 9, request)
-    table.insert(scenario.steps, 11, response)
+    table.insert(scenario.steps, 11, request)
+    table.insert(scenario.steps, 13, response)
     local open_selectors = {}
     vim.ui.select = function(items, _, cb)
         open_selectors[#open_selectors + 1] = function()
@@ -1060,7 +999,7 @@ test('tool lines', function()
     local function item(method, it)
         return { method = method, params = { threadId = 's1', item = it } }
     end
-    table.insert(scenario.steps, 8, {
+    table.insert(scenario.steps, 10, {
         op = 'send_notification',
         messages = {
             item('item/started', { type = 'agentMessage' }),
@@ -1123,12 +1062,12 @@ test('cancel', function()
 
     -- A failed interrupt is reported and cancel can be retried; the chat lives on.
     local scenario = load('codex-early-cancel')
-    scenario.steps[10].message.result = nil
-    scenario.steps[10].message.error = { code = -1, message = 'no' }
-    table.insert(scenario.steps, 11, vim.deepcopy(scenario.steps[9]))
+    scenario.steps[12].message.result = nil
+    scenario.steps[12].message.error = { code = -1, message = 'no' }
+    table.insert(scenario.steps, 13, vim.deepcopy(scenario.steps[11]))
     table.insert(
         scenario.steps,
-        12,
+        14,
         { op = 'send_response', message = { id = { ref = 'interrupt' }, result = {} } }
     )
     buf = open(scenario)
@@ -1146,20 +1085,19 @@ test('cancel', function()
     end, 'retried cancel')
     finish()
 
-    -- An agent that never answers: closing mid-turn ends the progress message.
+    -- An agent that never answers: closing mid-turn ends the turn.
     buf = open(load('acp-hang'), 'copilot')
     send(buf)
     assert(boomer.cancel())
     pause(50)
     assert(status(buf, 'cancelling'))
     finish()
-    assert(progress[#progress].status == 'failed')
 end)
 
 test('process failures', function()
     -- Exit reports the code and stderr; the draft survives.
     local scenario = load('codex-basic')
-    for i = #scenario.steps, 6, -1 do
+    for i = #scenario.steps, 8, -1 do
         scenario.steps[i] = nil
     end
     vim.list_extend(scenario.steps, {
@@ -1171,30 +1109,41 @@ test('process failures', function()
     ready(buf)
     type_draft(buf, 'keep')
     await(function()
-        return status(buf, 'closed')
+        return status(buf, 'exited')
     end, 'disconnect')
     assert(has(buf, 'Error: agent exited with code 3:\nboom'), text(buf))
     assert(draft(buf) == 'keep')
     enter(buf)
     assert(draft(buf) == 'keep', 'dead chat accepted a prompt')
-    finish(3)
+    assert(warned(buf, 'The agent has exited; :Boomer restarts it'), text(buf))
+    assert(last.exit.code == 3, last.stderr)
+    -- :Boomer restarts it in the same window, with the draft.
+    stage(load('codex-basic'))
+    local win = vim.fn.win_findbuf(buf)[1]
+    local new = boomer.open()
+    assert(new ~= buf and not api.nvim_buf_is_valid(buf), 'not restarted')
+    assert(api.nvim_win_get_buf(win) == new and draft(new) == 'keep', draft(new))
+    type_draft(new, '')
+    send(new)
+    turn(new)
+    finish()
 
     -- Startup failures leave an inspectable buffer.
     buf = open(load('acp-exit'), 'copilot')
     await(function()
-        return status(buf, 'closed')
+        return status(buf, 'exited')
     end, 'startup exit')
     assert(count(buf, 'Error:') == 1, 'exit error repeated: ' .. text(buf))
     finish(7)
     buf = open(load('acp-auth'), 'copilot')
     await(function()
-        return status(buf, 'failed')
+        return status(buf, 'no session')
     end, 'session error')
     assert(has(buf, 'Error: Authentication required'))
     boomer.close()
     buf = open(load('acp-version'), 'copilot')
     await(function()
-        return status(buf, 'failed')
+        return status(buf, 'exited')
     end, 'version error')
     assert(has(buf, 'Error: unsupported ACP version'), text(buf))
     boomer.close()
@@ -1202,12 +1151,12 @@ test('process failures', function()
         agents = { codex = { command = '/missing-boomer-test-executable' } },
     })
     buf = boomer.open()
-    assert(status(buf, 'failed') and has(buf, 'Error:'), text(buf))
+    assert(status(buf, 'exited') and has(buf, 'Error:'), text(buf))
     -- An agent that exited can be restarted or replaced.
     assert(boomer.agent('codex'))
     assert(not api.nvim_buf_is_valid(buf))
     buf = api.nvim_get_current_buf()
-    assert(status(buf, 'failed') and state(buf).agent == 'codex', text(buf))
+    assert(status(buf, 'exited') and state(buf).agent == 'codex', text(buf))
     boomer.close()
 
     -- Malformed lines are reported and skipped.
@@ -1221,7 +1170,7 @@ test('process failures', function()
 
     -- :bd and :bw close the agent and leave no buffer behind.
     scenario = load('codex-basic')
-    for i = #scenario.steps, 6, -1 do
+    for i = #scenario.steps, 8, -1 do
         scenario.steps[i] = nil
     end
     for _, unload in ipairs({ false, true }) do
@@ -1257,7 +1206,7 @@ test('sessions', function()
     -- No chat open: pick a saved Codex thread; paginated history is replayed.
     local list = load('codex-sessions')
     local resume = load('codex-resume-paginated')
-    play({ version = 1, profile = 'codex-v2', steps = steps(list, 1, nil, resume, 4) }, 'codex')
+    play({ version = 1, profile = 'codex-v2', steps = steps(list, 1, nil, resume, 6) }, 'codex')
     local labels
     vim.ui.select = function(items, opts, cb)
         labels = vim.tbl_map(opts.format_item, items)
@@ -1276,7 +1225,7 @@ test('sessions', function()
 
     -- Dismissing the picker with no chat starts a new session.
     local basic = load('codex-basic')
-    play({ version = 1, profile = 'codex-v2', steps = steps(list, 1, 5, basic, 4, 5) })
+    play({ version = 1, profile = 'codex-v2', steps = steps(list, 1, 7, basic, 6, 7) })
     vim.ui.select = function(_, _, cb)
         cb(nil)
     end
@@ -1285,7 +1234,7 @@ test('sessions', function()
     finish()
 
     -- A picker closed without an answer leaves a usable chat with no session.
-    play({ version = 1, profile = 'codex-v2', steps = steps(list, 1, 5, basic, 4, 5) })
+    play({ version = 1, profile = 'codex-v2', steps = steps(list, 1, 7, basic, 6, 7) })
     vim.ui.select = function() end
     boomer.resume()
     await(function()
@@ -1312,9 +1261,8 @@ test('sessions', function()
     ready(old)
     local rpc = last
     vim.cmd('vsplit')
+    -- The draft moves to the new buffer.
     type_draft(old, 'draft')
-    assert(not boomer.resume(), 'switch with a draft')
-    type_draft(old, '')
     vim.ui.select = function(items, opts, cb)
         labels = vim.tbl_map(opts.format_item, items)
         cb(items[2])
@@ -1328,7 +1276,8 @@ test('sessions', function()
     assert(labels[1] == 'Saved chat 2 | 2026-11-15 12:00', labels[1])
     ready(buf)
     assert(has(buf, 'Prompt: old question\n\nAgent:\nold answer'), text(buf))
-    assert(has(buf, '\n\n[Session: Saved chat 1]\n\nPrompt: '), text(buf))
+    assert(has(buf, '\n\n[Session: Saved chat 1]\n\nPrompt: draft'), text(buf))
+    type_draft(buf, '')
     send(buf)
     turn(buf)
     assert(boomer.new())
@@ -1341,18 +1290,18 @@ test('sessions', function()
 
     -- A failed load is reported in the new buffer and the chat stays usable.
     local refused = load('codex-resume-error')
-    refused.steps[4].message.params.threadId = 's2'
+    refused.steps[6].message.params.threadId = 's2'
     scenario = {
         version = 1,
         profile = 'codex-v2',
-        steps = steps(basic, 1, 5, list, 4, 5, refused, 4, 5, basic, 4, 5),
+        steps = steps(basic, 1, 7, list, 6, 7, refused, 6, 7, basic, 6, 7),
     }
     old = open(scenario)
     ready(old)
     vim.ui.select = pick('Saved chat 2')
     boomer.resume()
     await(function()
-        return status(api.nvim_get_current_buf(), 'failed')
+        return status(api.nvim_get_current_buf(), 'no session')
     end, 'failed load')
     buf = api.nvim_get_current_buf()
     assert(buf ~= old and has(buf, 'Error: session load refused'), text(buf))
@@ -1368,7 +1317,7 @@ test('sessions', function()
     scenario = {
         version = 1,
         profile = 'codex-v2',
-        steps = steps(basic, 1, 5, load('codex-sessions-error'), 4, 5),
+        steps = steps(basic, 1, 7, load('codex-sessions-error'), 6, 7),
     }
     buf = open(scenario)
     ready(buf)
@@ -1408,9 +1357,9 @@ local function winbar(buf, padded)
 end
 
 test('codex slash commands', function()
-    local base, models = load('codex-basic'), load('codex-models')
+    local base = load('codex-basic')
     local function codex_turn(text, extra)
-        local s = steps(base, 6, 9)
+        local s = steps(base, 8, 11)
         s[1].message.params.input[1].text = text
         s[1].message.params.model, s[1].message.params.effort = 'm2', 'high'
         if extra then
@@ -1418,8 +1367,7 @@ test('codex slash commands', function()
         end
         return s
     end
-    local scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 5) }
-    vim.list_extend(scenario.steps, steps(models, 4, 5))
+    local scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 7) }
     local resets = os.time() + 3600
     vim.list_extend(
         scenario.steps,
@@ -1483,7 +1431,7 @@ test('codex slash commands', function()
         ),
     })
     vim.list_extend(scenario.steps, codex_turn('Review main.lua carefully'))
-    local resumed = vim.deepcopy(base.steps[5])
+    local resumed = vim.deepcopy(base.steps[7])
     resumed.message.result.thread.id = 's9'
     resumed.message.id.ref = 'resume'
     vim.list_extend(scenario.steps, {
@@ -1569,10 +1517,10 @@ test('codex slash commands', function()
     turn(buf, 2)
     assert(not has(buf, 'Review main.lua carefully'), 'prompt shown instead of the command')
     send(buf, '/hi there')
-    assert(ran == 'there' and has(buf, 'hi from lua'))
+    assert(ran == 'there' and has(buf, 'Prompt: /hi there\n\nhi from lua'), text(buf))
     send(buf, '/help')
     assert(has(buf, '/review - Review a file') and has(buf, '/hi'), text(buf))
-    assert(not has(buf, '/close'), 'Ex-only command listed in the prompt')
+    assert(has(buf, '/close - Stop the agent'), text(buf))
     assert(has(buf, '/cancel - Cancel'), text(buf))
     assert(count(buf, 'Prompt: /help') == 1, 'typed /help echoed again')
 
@@ -1610,12 +1558,12 @@ end)
 test('codex permissions', function()
     local base = load('codex-basic')
     local function codex_turn(approval, sandbox)
-        local s = steps(base, 6, 9)
+        local s = steps(base, 8, 11)
         s[1].message.params.approvalPolicy = approval
         s[1].message.params.sandboxPolicy = sandbox
         return s
     end
-    local scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 9) }
+    local scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 11) }
     vim.list_extend(scenario.steps, codex_turn('on-request', { type = 'readOnly' }))
     vim.list_extend(scenario.steps, codex_turn('never', { type = 'dangerFullAccess' }))
     local buf = open(scenario, nil, {
@@ -1656,7 +1604,7 @@ end)
 test('codex modes', function()
     local base = load('codex-basic')
     local function codex_turn(mode, effort)
-        local s = steps(base, 6, 9)
+        local s = steps(base, 8, 11)
         s[1].message.params.collaborationMode = {
             mode = mode,
             settings = {
@@ -1667,8 +1615,7 @@ test('codex modes', function()
         }
         return s
     end
-    local scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 5) }
-    vim.list_extend(scenario.steps, steps(load('codex-models'), 4, 5))
+    local scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 7) }
     vim.list_extend(scenario.steps, codex_turn('plan'))
     vim.list_extend(scenario.steps, {
         notify('thread/settings/updated', {
@@ -1697,22 +1644,21 @@ test('codex modes', function()
     end, 'settings update')
     assert(state(buf).mode == 'Plan')
 
-    vim.ui.select = pick('Default')
+    -- <S-Tab> switches to the next mode, wrapping around.
     api.nvim_set_current_win(vim.fn.win_findbuf(buf)[1])
     keys('<S-Tab>')
     await(function()
         return state(buf).mode == 'Default'
     end, 'default')
+    assert(has(buf, 'Prompt: /mode default\n\n[Setting: mode = Default]'), text(buf))
     send(buf)
     turn(buf, 2)
     finish()
 end)
 
 test('codex defaults', function()
-    local base, models = load('codex-basic'), load('codex-models')
-    local scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 3) }
-    vim.list_extend(scenario.steps, steps(models, 4, 5))
-    vim.list_extend(scenario.steps, steps(base, 4))
+    local base = load('codex-basic')
+    local scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1) }
     scenario.steps[6].message.params.model = 'm2'
     scenario.steps[8].message.params.effort = 'high'
     local buf = open(scenario, nil, { agents = { codex = { model = 'm2', effort = 'HIGH' } } })
@@ -1721,17 +1667,15 @@ test('codex defaults', function()
     turn(buf)
     finish()
 
-    scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 3) }
-    vim.list_extend(scenario.steps, steps(models, 4, 5))
-    vim.list_extend(scenario.steps, steps(base, 4, 5))
+    scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 7) }
     buf = open(scenario, nil, { agents = { codex = { model = 'nope', effort = 'max' } } })
     ready(buf)
     assert(has(buf, 'Error: default model: nope is not offered by this agent'), text(buf))
     assert(has(buf, 'Error: default effort: max is not offered by this agent'), text(buf))
     finish()
 
-    scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 9) }
-    scenario.steps[6].message.params.collaborationMode = {
+    scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 11) }
+    scenario.steps[8].message.params.collaborationMode = {
         mode = 'plan',
         settings = { model = 'm1', reasoning_effort = vim.NIL, developer_instructions = vim.NIL },
     }
@@ -1887,20 +1831,15 @@ test('acp slash commands and defaults', function()
     keys('A<C-x><C-o><Esc>')
     assert(draft(buf) == '/permissions allow-all', draft(buf))
     type_draft(buf, '')
-    send(buf, '/help')
-    assert(has(buf, '/permissions [default|assisted|allow-all|show] - '), text(buf))
-    vim.ui.select = pick('allow-all')
-    send(buf, '/permissions')
+    -- Without a permissions setting, /permissions is the agent's command.
+    send(buf, '/permissions allow-all')
     turn(buf, 3)
     assert(has(buf, 'Prompt: /permissions allow-all'), text(buf))
     send(buf, '/mode agent')
     await(function()
         return state(buf).mode == 'Agent'
     end, 'mode')
-    -- <S-Tab> picks the mode, as Copilot's plan mode advises.
-    vim.ui.select = function(items, _, cb)
-        cb(items[2], 2)
-    end
+    -- <S-Tab> switches to the next mode, as Copilot's plan mode advises.
     api.nvim_set_current_win(vim.fn.win_findbuf(buf)[1])
     keys('<S-Tab>')
     await(function()
@@ -1930,7 +1869,7 @@ test('acp slash commands and defaults', function()
     -- Switching agents replaces the chat in the same window.
     local first = last
     local win = vim.fn.win_findbuf(buf)[1]
-    stage({ version = 1, profile = 'codex-v2', steps = steps(load('codex-basic'), 1, 5) })
+    stage({ version = 1, profile = 'codex-v2', steps = steps(load('codex-basic'), 1, 7) })
     send(buf, '/agent codex')
     await(function()
         return first.exit ~= nil
@@ -1948,7 +1887,7 @@ test('prompt queue', function()
     local base = load('codex-basic')
     -- A Codex turn for `text`, completing after `ms`, or failing with `fail`.
     local function prompt(text, ms, fail)
-        local s = steps(base, 6, 9)
+        local s = steps(base, 8, 11)
         s[1].message.params.input[1].text = text
         table.insert(s, 4, { op = 'delay', ms = ms or 0 })
         if fail then
@@ -1966,10 +1905,10 @@ test('prompt queue', function()
     end
 
     -- Prompts, user `prompt` commands and committed (<C-j>) drafts submitted
-    -- during a turn are sent in order, one per turn.
+    -- during a turn are sent in order, one per turn, and shown when sent.
     local buf = open(
         scenario(
-            steps(base, 1, 5),
+            steps(base, 1, 7),
             prompt('hello', 300),
             prompt('q1'),
             prompt('Review x'),
@@ -1978,13 +1917,16 @@ test('prompt queue', function()
         nil,
         { commands = { review = { prompt = 'Review $ARGUMENTS' } } }
     )
-    -- A committed command that cannot run is followed by its warning only,
-    -- after one blank line also as the first output.
+    -- A committed command that cannot run returns to the draft, after its
+    -- warning.
     ready(buf)
     type_draft(buf, '/cancel')
     keys('A<C-j><Esc>')
-    local first = 'Prompt: /cancel\n\nWarning: Nothing to cancel\n\nPrompt: '
-    assert(text(buf) == first, text(buf))
+    await(function()
+        return draft(buf) == '/cancel'
+    end, 'committed draft restored; transcript:\n' .. text(buf))
+    assert(text(buf) == 'Warning: Nothing to cancel\n\nPrompt: /cancel', text(buf))
+    type_draft(buf, '')
     send(buf, 'hello')
     await(function()
         return has(buf, 'Agent:\nhello')
@@ -1996,24 +1938,24 @@ test('prompt queue', function()
     assert(draft(buf) == '' and state(buf).queued == 2, draft(buf))
     assert(virtual(buf) == 'Queued: q1\nQueued: /review x', virtual(buf))
     assert(winbar(buf):find('| running | 2 queued', 1, true), winbar(buf))
+    assert(not has(buf, 'q1'), 'queued prompt shown before it was sent')
     type_draft(buf, 'q3')
     keys('A<C-j><Esc>')
     await(function()
-        return has(buf, 'Prompt: q3\n\n[queued]')
+        return state(buf).queued == 3
     end, 'committed prompt queued; transcript:\n' .. text(buf))
-    assert(state(buf).queued == 3)
+    assert(not has(buf, 'q3'), 'committed prompt left in the transcript')
     type_draft(buf, 'typing')
     turn(buf, 4)
     assert(
         has(
             buf,
-            '[queued]\n\n[completed]\n\nPrompt: q1\n\nAgent:\nhello\n\n[completed]\n\n'
+            'Agent:\nhello\n\n[completed]\n\nPrompt: q1\n\nAgent:\nhello\n\n[completed]\n\n'
                 .. 'Prompt: /review x\n\nAgent:\nhello\n\n[completed]\n\n'
-                .. 'Agent:\nhello\n\n[completed]\n\nPrompt: typing'
+                .. 'Prompt: q3\n\nAgent:\nhello\n\n[completed]\n\nPrompt: typing'
         ),
         text(buf)
     )
-    assert(count(buf, 'q3') == 1, 'committed prompt echoed again')
     assert(state(buf).queued == nil and virtual(buf) == '', virtual(buf))
     finish()
 
@@ -2039,8 +1981,7 @@ test('prompt queue', function()
     end, 'prompt queued while cancelling; transcript:\n' .. text(buf))
     finish()
 
-    -- /cancel discards the queue and cancels the turn; a prompt queued after
-    -- it is sent after the cancelled turn.
+    -- /cancel does the same.
     buf = open(scenario(load('codex-early-cancel').steps, prompt('after')))
     send(buf, 'hello')
     for _, s in ipairs({ 'q1', 'q2' }) do
@@ -2050,26 +1991,24 @@ test('prompt queue', function()
     assert(state(buf).queued == 2, 'not queued')
     type_draft(buf, '/cancel')
     enter(buf)
-    assert(status(buf, 'cancelling') and draft(buf) == '', draft(buf))
+    assert(status(buf, 'cancelling') and draft(buf) == 'q1\n\nq2', draft(buf))
     assert(state(buf).queued == nil and virtual(buf) == '', virtual(buf))
-    assert(has(buf, 'Prompt: /cancel\n\n[cancelled 2 queued]\n\nPrompt: '), text(buf))
     type_draft(buf, 'after')
     enter(buf)
     await(function()
-        return has(buf, '[cancelled 2 queued]\n\n[cancelled]\n\nPrompt: after')
+        return has(buf, 'Prompt: /cancel\n\n[cancelled]\n\nPrompt: after')
             and count(buf, '[completed]') == 1
     end, '/cancel; transcript:\n' .. text(buf))
-    assert(not has(buf, 'Prompt: q1') and not has(buf, 'Prompt: q2'), text(buf))
     send(buf, '/cancel')
-    local tail = 'Prompt: /cancel\n\nWarning: Nothing to cancel\n\nPrompt: '
+    local tail = 'Warning: Nothing to cancel\n\nPrompt: /cancel'
     assert(text(buf):sub(-#tail) == tail, text(buf))
+    type_draft(buf, '')
     finish()
 
-    -- Prompts queued while the session starts can be taken back with CTRL-C,
-    -- or dropped with :Boomer cancel; a failed turn returns the queue to the
-    -- draft.
-    local start = steps(base, 1, 5)
-    table.insert(start, 5, { op = 'delay', ms = 100 })
+    -- Prompts queued while the session starts can be taken back with CTRL-C
+    -- or :Boomer cancel; a failed turn returns the queue to the draft.
+    local start = steps(base, 1, 7)
+    table.insert(start, 7, { op = 'delay', ms = 100 })
     buf = open(scenario(start, prompt('hello', 200, 'boom')))
     keys('Aearly<CR><Esc>')
     assert(status(buf, 'starting') and state(buf).queued == 1, 'not queued while starting')
@@ -2077,8 +2016,7 @@ test('prompt queue', function()
     assert(draft(buf) == 'early' and state(buf).queued == nil, draft(buf))
     keys('A<CR><Esc>')
     assert(state(buf).queued == 1, 'not queued again')
-    assert(boomer.cancel() and state(buf).queued == nil and draft(buf) == '', draft(buf))
-    assert(has(buf, 'Prompt: /cancel\n\n[cancelled 1 queued]'), text(buf))
+    assert(boomer.cancel() and state(buf).queued == nil and draft(buf) == 'early', draft(buf))
     send(buf, 'hello')
     type_draft(buf, 'q1')
     enter(buf)
@@ -2119,11 +2057,11 @@ test('prompt queue', function()
     finish()
 end)
 
-test('command queue', function()
+test('commands during a turn', function()
     local acp = load('acp-basic')
     local agent_mode = 'https://agentclientprotocol.com/protocol/session-modes#agent'
     local plan_mode = 'https://agentclientprotocol.com/protocol/session-modes#plan'
-    local function options(model, effort)
+    local function options(model)
         return {
             {
                 id = 'model',
@@ -2132,14 +2070,6 @@ test('command queue', function()
                 type = 'select',
                 currentValue = model,
                 options = { { value = 'm1', name = 'One' }, { value = 'm2', name = 'Two' } },
-            },
-            {
-                id = 'reasoning_effort',
-                name = 'Effort',
-                category = 'thought_level',
-                type = 'select',
-                currentValue = effort,
-                options = { { value = 'low', name = 'low' }, { value = 'high', name = 'high' } },
             },
         }
     end
@@ -2164,7 +2094,7 @@ test('command queue', function()
         }),
         respond({
             sessionId = 's1',
-            configOptions = options('m1', 'low'),
+            configOptions = options('m1'),
             modes = {
                 currentModeId = agent_mode,
                 availableModes = {
@@ -2174,22 +2104,19 @@ test('command queue', function()
             },
         }, 'new'),
     })
-    vim.list_extend(s, prompt('hello', 300))
-    -- Settings change on the agent only once the turn has ended, in order.
-    vim.list_extend(s, {
+    -- Settings change on the agent during the turn.
+    local hello = prompt('hello', 300)
+    for k, step in ipairs({
         expect('session/set_config_option', { sessionId = 's1', configId = 'model', value = 'm2' }),
-        respond({ configOptions = options('m2', 'low') }),
-        expect(
-            'session/set_config_option',
-            { sessionId = 's1', configId = 'reasoning_effort', value = 'high' }
-        ),
-        respond({ configOptions = options('m2', 'high') }),
+        respond({ configOptions = options('m2') }),
         expect('session/set_mode', { sessionId = 's1', modeId = plan_mode }),
         respond(vim.empty_dict()),
-    })
-    vim.list_extend(s, prompt('q1'))
+    }) do
+        table.insert(hello, 2 + k, step)
+    end
+    vim.list_extend(s, hello)
     vim.list_extend(s, prompt('/permissions allow-all'))
-    vim.list_extend(s, prompt('again', 300))
+    vim.list_extend(s, prompt('q1'))
     vim.list_extend(s, {
         expect('session/set_config_option', { sessionId = 's1', configId = 'model', value = 'm1' }),
         {
@@ -2203,87 +2130,63 @@ test('command queue', function()
         return has(buf, 'Agent:\nhello')
     end, 'streamed text')
 
-    -- Boomer's commands typed during a turn are queued with prompts; pickers
-    -- (/effort, <S-Tab>) open now and queue the choice. The agent's
-    -- /permissions is queued as a prompt.
+    -- Settings typed during a turn change at once, also through <S-Tab>;
+    -- prompts and agent commands are queued.
     type_draft(buf, '/model m2')
     enter(buf)
-    vim.ui.select = pick('high')
-    type_draft(buf, '/effort')
-    enter(buf)
     await(function()
-        return state(buf).queued == 2
-    end, 'picked effort queued')
-    vim.ui.select = pick('Plan')
+        return state(buf).model == 'Two'
+    end, 'model during the turn')
     api.nvim_set_current_win(vim.fn.win_findbuf(buf)[1])
     keys('<S-Tab>')
-    await(function()
-        return state(buf).queued == 3
-    end, 'picked mode queued')
-    vim.ui.select = function()
-        error('unexpected selector')
-    end
-    for _, line in ipairs({ 'q1', '/permissions allow-all' }) do
+    for _, line in ipairs({ '/permissions allow-all', 'q1' }) do
         type_draft(buf, line)
         enter(buf)
     end
-    -- Commands that replace the session still wait for the turn.
+    assert(virtual(buf) == 'Queued: /permissions allow-all\nQueued: q1', virtual(buf))
+    await(function()
+        return state(buf).mode == 'Plan' and status(buf, 'running')
+    end, 'settings during the turn')
+    assert(
+        has(
+            buf,
+            'Prompt: /model m2\n\n[Setting: model = Two]\n\n'
+                .. 'Prompt: /mode plan\n\n[Setting: mode = Plan]'
+        ),
+        text(buf)
+    )
+    -- Commands that replace the session wait for the turn.
     type_draft(buf, '/new')
     enter(buf)
     assert(draft(buf) == '/new', draft(buf))
     assert(warned(buf, 'A turn is still active'), text(buf))
     type_draft(buf, '')
-    local queued = 'Queued: /model m2\nQueued: /effort high\nQueued: /mode plan\n'
-        .. 'Queued: q1\nQueued: /permissions allow-all'
-    assert(virtual(buf) == queued, virtual(buf))
-    assert(state(buf).model == 'One' and status(buf, 'running'))
     turn(buf, 3)
     assert(
         has(
             buf,
-            '[completed]\n\nPrompt: /model m2\n\n[Setting: model = Two]\n\n'
-                .. 'Prompt: /effort high\n\n[Setting: effort = high]\n\n'
-                .. 'Prompt: /mode plan\n\n[Setting: mode = Plan]\n\n'
-                .. 'Prompt: q1\n\nAgent:\nhello\n\n[completed]\n\n'
-                .. 'Prompt: /permissions allow-all\n\nAgent:\nhello\n\n[completed]'
+            'Prompt: /permissions allow-all\n\nAgent:\nhello\n\n[completed]\n\n'
+                .. 'Prompt: q1\n\nAgent:\nhello\n\n[completed]'
         ),
         text(buf)
     )
     assert(state(buf).model == 'Two' and state(buf).mode == 'Plan', vim.inspect(state(buf)))
     assert(state(buf).queued == nil and virtual(buf) == '', virtual(buf))
-
-    -- A committed (<C-j>) command is marked; a failed one returns the rest
-    -- of the queue to the draft.
-    send(buf, 'again')
+    -- A refused setting is reported.
+    assert(boomer.model('One'))
     await(function()
-        return count(buf, 'Agent:\nhello') == 4
-    end, 'streamed text')
-    type_draft(buf, '/model One')
-    keys('A<C-j><Esc>')
-    await(function()
-        return has(buf, 'Prompt: /model One\n\n[queued]')
-    end, 'committed command queued; transcript:\n' .. text(buf))
-    type_draft(buf, 'q2')
-    enter(buf)
-    assert(virtual(buf) == 'Queued: /model m1\nQueued: q2', virtual(buf))
-    await(function()
-        return has(buf, 'Error: nope') and draft(buf) == 'q2'
-    end, 'failed setting; draft: ' .. draft(buf))
-    assert(state(buf).model == 'Two' and state(buf).queued == nil)
-    assert(not has(buf, 'Prompt: /model m1'), text(buf))
+        return has(buf, 'Error: nope')
+    end, 'refused setting')
+    assert(state(buf).model == 'Two')
     finish()
 
-    -- Native Codex compaction is queued as a turn of its own; cancel returns
-    -- queued commands to the draft.
+    -- Native Codex compaction is a turn of its own: it waits for the
+    -- running one.
     local base = load('codex-basic')
-    local function codex_prompt(text, ms)
-        local t = steps(base, 6, 9)
-        t[1].message.params.input[1].text = text
-        table.insert(t, 4, { op = 'delay', ms = ms or 0 })
-        return t
-    end
-    s = steps(base, 1, 5)
-    vim.list_extend(s, codex_prompt('hello', 300))
+    s = steps(base, 1, 7)
+    local t = steps(base, 8, 11)
+    table.insert(t, 4, { op = 'delay', ms = 300 })
+    vim.list_extend(s, t)
     vim.list_extend(s, {
         expect('thread/compact/start', { threadId = 's1' }),
         respond(vim.empty_dict()),
@@ -2296,32 +2199,16 @@ test('command queue', function()
             { threadId = 's1', turn = { id = 't2', items = {}, status = 'completed' } }
         ),
     })
-    vim.list_extend(s, codex_prompt('q1'))
     buf = open({ version = 1, profile = 'codex-v2', steps = s })
-    send(buf, 'hello')
-    for _, line in ipairs({ '/compact', 'q1' }) do
-        type_draft(buf, line)
-        enter(buf)
-    end
-    assert(virtual(buf) == 'Queued: /compact\nQueued: q1', virtual(buf))
-    turn(buf, 2)
-    assert(
-        has(buf, '[completed]\n\nPrompt: /compact\n\n[compacted]\n\nPrompt: q1\n\nAgent:\nhello'),
-        text(buf)
-    )
-    finish()
-
-    buf = open(load('codex-early-cancel'))
     send(buf, 'hello')
     type_draft(buf, '/compact')
     enter(buf)
-    assert(virtual(buf) == 'Queued: /compact', virtual(buf))
-    keys('<C-c>')
-    assert(draft(buf) == '/compact', draft(buf))
+    assert(draft(buf) == '/compact' and warned(buf, 'A turn is still active'), text(buf))
+    turn(buf)
+    enter(buf)
     await(function()
-        return status(buf, 'ready')
-    end, 'cancelled')
-    assert(not has(buf, '[compacted]'), text(buf))
+        return has(buf, 'Prompt: /compact\n\n[compacted]') and status(buf, 'ready')
+    end, 'compacted')
     finish()
 end)
 
@@ -2401,8 +2288,7 @@ test('codex protocol edges', function()
             turn = { id = id, items = {}, status = status, error = err or vim.NIL },
         })
     end
-    local amendment = { host = 'example.com', action = 'allow' }
-    local scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 5) }
+    local scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 7) }
     vim.list_extend(scenario.steps, {
         -- Requests Boomer does not handle, and approvals outside a turn.
         request('u1', 'item/tool/call', { threadId = 's1' }),
@@ -2429,7 +2315,7 @@ test('codex protocol edges', function()
         -- API-key logins have no rate limits.
         expect('account/rateLimits/read', vim.empty_dict()),
         reject('chatgpt authentication required'),
-        -- Older servers propose amendments instead of listing decisions.
+        -- Servers that do not list decisions get the standard ones.
         turn_start('hello'),
         respond({ turn = { id = 't1', items = {}, status = 'inProgress' } }),
         notify('item/started', {
@@ -2446,12 +2332,8 @@ test('codex protocol edges', function()
             threadId = 's1',
             itemId = 'c1',
             command = 'curl example.com',
-            proposedExecpolicyAmendment = { 'curl' },
-            proposedNetworkPolicyAmendments = { amendment },
         }),
-        response('a1', {
-            decision = { applyNetworkPolicyAmendment = { network_policy_amendment = amendment } },
-        }),
+        response('a1', { decision = 'acceptForSession' }),
         -- The server withdraws a request before it is answered.
         {
             op = 'send_request',
@@ -2472,8 +2354,6 @@ test('codex protocol edges', function()
         reject('busy'),
         expect('thread/compact/start', { threadId = 's1' }),
         reject('cannot compact now'),
-        expect('model/list', { limit = 100 }),
-        reject('offline'),
     })
     local asked = 0
     local function approve(items, opts, cb)
@@ -2482,8 +2362,8 @@ test('codex protocol edges', function()
         if #labels == 2 then
             return pick('Grant for this turn')(items, opts, cb)
         end
-        assert(#labels == 6 and labels[1] == 'Deny', vim.inspect(labels))
-        pick('applyNetworkPolicyAmendment')(items, opts, cb)
+        assert(#labels == 4 and labels[1] == 'Deny', vim.inspect(labels))
+        pick('Allow for this session')(items, opts, cb)
     end
     vim.ui.select = approve
     local buf = open(scenario)
@@ -2530,10 +2410,6 @@ test('codex protocol edges', function()
     await(function()
         return has(buf, 'Error: cannot compact now') and status(buf, 'ready')
     end, 'compact error')
-    send(buf, '/model')
-    await(function()
-        return has(buf, 'Error: offline')
-    end, 'model/list error')
 
     -- A function winbar that fails shows nothing.
     require('boomer.config').options.winbar = function()
@@ -2542,14 +2418,14 @@ test('codex protocol edges', function()
     assert(winbar(buf) == '', winbar(buf))
     finish()
 
-    -- Defaults cannot be checked without the model list; they are sent as is.
+    -- Without the model list the chat works; the default model is skipped.
     scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 3) }
     vim.list_extend(scenario.steps, { expect('model/list', { limit = 100 }), reject('offline') })
-    vim.list_extend(scenario.steps, steps(base, 4, 5))
-    scenario.steps[6].message.params.model = 'm2'
+    vim.list_extend(scenario.steps, steps(base, 6, 7))
     buf = open(scenario, nil, { agents = { codex = { model = 'm2' } } })
     ready(buf)
-    assert(has(buf, 'Error: default model and effort not checked: offline'), text(buf))
+    assert(has(buf, 'Error: model list: offline'), text(buf))
+    assert(has(buf, 'Error: default model: m2 is not offered by this agent'), text(buf))
     finish()
 end)
 
@@ -2614,10 +2490,18 @@ test('acp protocol edges', function()
             },
         },
         prompt('hello'),
-        respond({
-            stopReason = 'end_turn',
-            usage = { totalTokens = 300, inputTokens = 200, outputTokens = 100 },
-        }),
+        {
+            op = 'send_notification',
+            messages = {
+                update({
+                    sessionUpdate = 'usage_update',
+                    used = 300,
+                    size = 1000,
+                    cost = { amount = 0.5, currency = 'USD' },
+                }),
+            },
+        },
+        respond({ stopReason = 'end_turn' }),
         prompt('/plan go'),
         respond({ stopReason = 'max_tokens' }),
     })
@@ -2635,7 +2519,7 @@ test('acp protocol edges', function()
     send(buf, 'hello')
     turn(buf)
     send(buf, '/usage')
-    assert(has(buf, 'Last turn: 300 (200 in, 100 out)'), text(buf))
+    assert(has(buf, 'Context: 300 of 1.0k tokens (30%)'), text(buf))
     -- Agent commands run from Ex are echoed as the user's message.
     vim.cmd('Boomer plan go')
     await(function()
@@ -2651,19 +2535,16 @@ test('acp protocol edges', function()
     end, 'list unsupported')
     boomer.resume('s5')
     await(function()
-        return status(api.nvim_get_current_buf(), 'failed')
+        return status(api.nvim_get_current_buf(), 'no session')
     end, 'load unsupported')
     assert(has(api.nvim_get_current_buf(), 'Error: this agent cannot load sessions'))
     finish()
 end)
 
-test('completion fetches what it lacks', function()
-    -- Codex lists its models and sessions only on request: completion asks
-    -- once in the background and shows the values when they arrive.
+test('completion', function()
+    -- Codex models are listed at startup.
     local base = load('codex-basic')
-    local scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 5) }
-    vim.list_extend(scenario.steps, steps(load('codex-models'), 4, 5))
-    vim.list_extend(scenario.steps, steps(load('codex-sessions'), 4, 5))
+    local scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 7) }
     local buf = open(scenario)
     ready(buf)
     type_draft(buf, '/model ')
@@ -2688,11 +2569,8 @@ test('completion fetches what it lacks', function()
     assert(vim.deep_equal(shown, { 'm1', 'm2' }), vim.inspect(shown))
     assert(vim.deep_equal(vim.fn.getcompletion('Boomer effort ', 'cmdline'), { 'high' }))
     type_draft(buf, '')
+    -- Sessions are picked, not completed.
     assert(vim.deep_equal(vim.fn.getcompletion('Boomer resume ', 'cmdline'), {}))
-    assert(vim.deep_equal(vim.fn.getcompletion('Boomer resume ', 'cmdline'), {}))
-    await(function()
-        return #vim.fn.getcompletion('Boomer resume ', 'cmdline') > 0
-    end, 'sessions')
     finish()
 
     -- ACP agents without config options may report legacy session models.
@@ -2735,8 +2613,8 @@ test('user commands and chat edges', function()
     assert(boomer.statusline() == '' and boomer.winbar() == '')
 
     local base = load('codex-basic')
-    local scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 9) }
-    scenario.steps[6].message.params.input[1].text = 'sent x'
+    local scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 11) }
+    scenario.steps[8].message.params.input[1].text = 'sent x'
     local buf
     buf = open(scenario, nil, {
         commands = {
@@ -2751,16 +2629,7 @@ test('user commands and chat edges', function()
                     error('oops', 0)
                 end,
             },
-            empty = {
-                prompt = function()
-                    return ' '
-                end,
-            },
-            broken = {
-                prompt = function()
-                    error('nope', 0)
-                end,
-            },
+            empty = { prompt = ' ' },
             files = {
                 prompt = 'Read $ARGUMENTS',
                 complete = function(st)
@@ -2774,7 +2643,6 @@ test('user commands and chat edges', function()
     local notified = #notices
     assert(not boomer.run('bad') and warned(buf, '/bad: oops'), text(buf))
     assert(not boomer.run('empty') and warned(buf, '/empty produced an empty prompt'))
-    assert(not boomer.run('broken') and warned(buf, '/broken: nope'), text(buf))
     assert(not boomer.run('nope') and warned(buf, 'Unknown command /nope'))
     assert(#notices == notified, 'notified while the chat is shown: ' .. notices[#notices])
     -- A hidden chat is notified too.
@@ -2788,7 +2656,7 @@ test('user commands and chat edges', function()
 
     assert(boomer.run('go x'), text(buf))
     turn(buf)
-    assert(has(buf, 'Prompt: sent x'), text(buf))
+    assert(has(buf, 'Prompt: /go x\n\nPrompt: sent x'), text(buf))
     -- The omnifunc only completes on the prompt line.
     api.nvim_set_current_win(vim.fn.win_findbuf(buf)[1])
     api.nvim_win_set_cursor(0, { 1, 0 })
@@ -2798,7 +2666,7 @@ end)
 
 test('VimLeavePre does not wait', function()
     local scenario = load('codex-basic')
-    for i = #scenario.steps, 6, -1 do
+    for i = #scenario.steps, 8, -1 do
         scenario.steps[i] = nil
     end
     local buf = open(scenario)

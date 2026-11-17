@@ -5,7 +5,7 @@
 ---@class boomer.Status
 ---@field agent string Profile name.
 ---@field protocol 'codex'|'acp'
----@field state string starting, loading, ready, running, cancelling, failed, closed or no session.
+---@field state string starting, loading, ready, running, cancelling, no session or exited.
 ---@field queued? integer Prompts waiting to be sent.
 ---@field cwd string
 ---@field session? string
@@ -15,7 +15,7 @@
 ---@field mode? string
 ---@field permissions? string Permission preset label (Codex).
 ---@field context? { used: number?, size: number? } Tokens in the context window.
----@field tokens? { total: number?, input: number?, output: number? }
+---@field tokens? { total: number?, input: number?, output: number? } Session totals (Codex).
 ---@field cost? { amount: number?, currency: string? }
 ---@field limits? boomer.Limits Account rate limits (Codex).
 ---@field buf? integer Chat buffer (in copies handed out by boomer.status()).
@@ -33,7 +33,7 @@ local util = require('boomer.util')
 local M = {}
 
 local busy = { starting = true, loading = true, running = true, cancelling = true }
-local bad = { failed = true, closed = true }
+local bad = { ['no session'] = true, exited = true }
 
 local function context(ctx)
     if not ctx or type(ctx.used) ~= 'number' then
@@ -171,8 +171,7 @@ function M.usage(st)
     end
     local t = st.tokens
     if t and type(t.total) == 'number' then
-        -- Codex reports session totals, ACP agents the last turn.
-        lines[#lines + 1] = (st.protocol == 'acp' and 'Last turn: ' or 'Tokens: ')
+        lines[#lines + 1] = 'Tokens: '
             .. util.tokens(t.total)
             .. (
                 t.input
