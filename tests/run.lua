@@ -1710,6 +1710,14 @@ test('acp slash commands and defaults', function()
                 currentValue = effort,
                 options = { { value = 'low', name = 'low' }, { value = 'high', name = 'high' } },
             },
+            -- Copilot reports an on/off option in the permissions category.
+            {
+                id = 'allow_all',
+                name = 'Allow all',
+                category = 'permissions',
+                type = 'boolean',
+                currentValue = false,
+            },
         }
     end
     local function prompt(text, extra)
@@ -1831,9 +1839,19 @@ test('acp slash commands and defaults', function()
     keys('A<C-x><C-o><Esc>')
     assert(draft(buf) == '/permissions allow-all', draft(buf))
     type_draft(buf, '')
-    -- Without a permissions setting, /permissions is the agent's command.
-    send(buf, '/permissions allow-all')
+    -- The agent's own /permissions wins over its permissions option: the
+    -- picker offers the presets in its hint.
+    local offered
+    vim.ui.select = function(items, opts, cb)
+        offered = vim.tbl_map(opts.format_item, items)
+        pick('allow-all')(items, opts, cb)
+    end
+    assert(boomer.permissions())
     turn(buf, 3)
+    assert(
+        vim.deep_equal(offered, { 'default', 'assisted', 'allow-all', 'show' }),
+        vim.inspect(offered)
+    )
     assert(has(buf, 'Prompt: /permissions allow-all'), text(buf))
     send(buf, '/mode agent')
     await(function()

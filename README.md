@@ -144,7 +144,7 @@ Sets the session mode, such as `plan` for Codex. Copilot's `/plan` enters plan m
 
 #### `/permissions [preset]`
 
-Chooses what the agent may do without asking: Read Only, Default or Full Access for Codex; `default`, `assisted` or `allow-all` for Copilot.
+Chooses what the agent may do without asking: Read Only, Default or Full Access for Codex; `default`, `assisted` or `allow-all` for Copilot. An agent's own `/permissions` command takes precedence over its permissions setting.
 
 #### `/resume [id]`
 

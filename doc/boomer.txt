@@ -168,10 +168,11 @@ line is not shown. Plain |:Boomer| writes no result.
         The preset applies to the next turn and later ones in this session;
         a new or loaded session starts with the agent's configured policy.
         If an ACP agent advertises its own `/permissions`, the line is sent
-        to it, and the choices in its hint complete the argument. Copilot
-        offers `default`, `assisted`, `allow-all` (approve every tool, path
-        and URL request for this session) and `show`. Otherwise the command
-        is not available.
+        to it, even if the agent also has a permissions setting; the
+        choices in its hint complete the argument, and without one a picker
+        offers them. Copilot offers `default`, `assisted`, `allow-all`
+        (approve every tool, path and URL request for this session) and
+        `show`. Otherwise the command is not available.
 
 /resume [{id}]                                          *boomer-/resume*
         Load a saved session for the working directory. Without a chat, this

@@ -900,7 +900,9 @@ end
 --
 -- /model, /effort, /mode and /permissions change the setting at once, also
 -- during a turn (Codex applies it from its next turn). Without such a setting,
--- the line goes to the agent's own command of that name, if it has one.
+-- the line goes to the agent's own command of that name, if it has one. An
+-- agent's own /permissions always wins: Copilot's presets (allow-all, ...)
+-- say more than its on/off permissions option.
 
 local nouns =
     { model = 'model', effort = 'reasoning effort', mode = 'mode', permissions = 'permissions' }
@@ -909,6 +911,14 @@ local nouns =
 local function setting_of(c, name)
     local s = util.find(c.client:settings(), util.categories[name])
     return s and #s.choices > 0 and s or nil
+end
+
+-- The agent's own command that handles setting command `name`, if any.
+local function agent_setting(c, name)
+    local cmd = c.agent_commands[name]
+    if cmd and (name == 'permissions' or not setting_of(c, name)) then
+        return cmd
+    end
 end
 
 -- Show `/{name} {choice}` and change the setting.
@@ -932,14 +942,27 @@ local function choose_setting(name, value)
     if not check(c, 'session') then
         return
     end
-    local s = setting_of(c, name)
-    if not s then
-        if not c.agent_commands[name] then
-            return warn('This agent offers no ' .. nouns[name] .. ' setting', c)
+    local cmd = agent_setting(c, name)
+    local s = not cmd and setting_of(c, name)
+    if cmd then
+        local values = not value and commands.hint_values(cmd.hint) or {}
+        if #values == 0 then
+            local line = '/' .. name .. (value and (' ' .. value) or '')
+            submit(c, line, line)
+            return true
         end
-        local line = '/' .. name .. (value and (' ' .. value) or '')
-        submit(c, line, line)
+        local opts = { prompt = 'Boomer ' .. nouns[name] .. ':', format_item = tostring }
+        pick(c, values, opts, function(choice, err)
+            if err then
+                report(c, err)
+            elseif choice and check(c, 'session') then
+                local line = '/' .. name .. ' ' .. choice
+                submit(c, line, line)
+            end
+        end)
         return true
+    elseif not s then
+        return warn('This agent offers no ' .. nouns[name] .. ' setting', c)
     elseif value then
         local choice = util.choice(s, value)
         if not choice then
@@ -1249,10 +1272,10 @@ local function arg_candidates(name)
     elseif not util.categories[name] or not c or c.dead or not c.client then
         return {}
     end
-    local s = setting_of(c, name)
+    local cmd = agent_setting(c, name)
+    local s = not cmd and setting_of(c, name)
     if not s then
-        local agent_cmd = c.agent_commands[name]
-        return agent_cmd and commands.hint_values(agent_cmd.hint) or {}
+        return cmd and commands.hint_values(cmd.hint) or {}
     end
     -- Copilot's mode IDs are URIs; their names are what anyone types. It also
     -- lists some models twice.
