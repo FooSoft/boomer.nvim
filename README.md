@@ -14,7 +14,8 @@ buffer, in Insert mode. Type after `Prompt: ` and press **Enter** to send;
 prompt while you type. Enter during a turn queues the prompt; queued prompts are
 sent one per turn. Setting commands (`/model`, `/permissions`, ...) and `/compact`
 typed during a turn are queued too and run between turns, in order. **Ctrl-C**
-cancels the active turn and returns queued prompts and commands to the draft.
+cancels the active turn and returns queued prompts and commands to the draft;
+`/cancel` cancels it and discards them.
 Full documentation: `:help boomer`.
 
 Commands work as `:Boomer {command}` (with completion) or typed in the prompt as
@@ -32,7 +33,8 @@ Commands work as `:Boomer {command}` (with completion) or typed in the prompt as
 | `/compact [focus]` | Compact the conversation |
 | `/usage` | Context, token and cost usage; Codex 5h and weekly limits |
 | `/help` | List commands, including user and agent commands |
-| `:Boomer cancel`, `:Boomer close` | Cancel the turn / stop the agent |
+| `/cancel` | Cancel the turn and clear the queue |
+| `:Boomer close` | Stop the agent |
 
 Slash commands advertised by ACP agents (such as Copilot's `/plan`) are sent to
 the agent; unknown ones are not sent.

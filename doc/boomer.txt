@@ -60,9 +60,9 @@ open right away; only the choice is queued, as the command that selects it
 or <S-Tab> is shown as the user's message when it runs, as typed ones are.
 `/new`, `/resume` and `/agent` cannot be queued. A draft
 committed with CTRL-J during a turn is queued too and marked `[queued]`.
-CTRL-C or `:Boomer cancel` cancels the turn and puts the queued prompts and
-commands back into the draft, before the text being typed; those queued
-after that run once the cancelled turn ends. A failed turn or queued command,
+CTRL-C cancels the turn and puts the queued prompts and commands back into
+the draft, before the text being typed; |boomer-/cancel| cancels it and
+discards them. Those queued after that run once the cancelled turn ends. A failed turn or queued command,
 an agent exit or a session that fails to load also returns them to the draft.
 
 - One chat per Neovim instance. Hiding the window keeps it; |:bdelete| or
@@ -178,9 +178,11 @@ Commands that take an argument open a |vim.ui.select()| picker without one.
 /help                                                   *boomer-/help*
         List the available commands, including user and agent commands.
 
-:Boomer cancel                                          *boomer-cancel*
-        Cancel the active turn and return queued prompts to the draft
-        (|boomer-queue|) (Ex only; CTRL-C in the chat).
+/cancel                                         *boomer-/cancel* *boomer-cancel*
+        Cancel the active turn and discard the queued prompts and commands
+        (|boomer-queue|), noting how many as `[cancelled N queued]`. Runs at
+        once, also during a turn. CTRL-C in the chat cancels too, but returns
+        the queue to the draft instead.
 
 :Boomer close                                           *boomer-close*
         Stop the agent and wipe the chat buffer (Ex only).
@@ -424,7 +426,7 @@ Boomer defines no global mappings. In the chat buffer:
   <CR>          (Insert) Send the draft or run the command; queue it during
                 a turn (|boomer-queue|).
   CTRL-C        (Insert, Normal) Cancel the active turn; queued prompts
-                return to the draft.
+                return to the draft (|boomer-/cancel| discards them).
   <S-Tab>       (Insert, Normal, Visual) Pick the session mode, like
                 |boomer-/mode|. With the completion menu open, it selects
                 the previous item instead.

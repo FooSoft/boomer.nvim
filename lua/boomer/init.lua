@@ -337,7 +337,7 @@ local function blocked(c, gate, typed)
     elseif pending(c) then
         return 'A permission request is waiting; :Boomer shows it again'
     elseif c.busy or c.applying then
-        return 'A turn is still active; wait or use :Boomer cancel'
+        return 'A turn is still active; wait or use /cancel'
     elseif switching then
         return not typed and c.view:draft() ~= '' and 'Send or clear the draft before switching'
             or nil
@@ -671,6 +671,35 @@ local function submit_draft(c, text, shown)
     end
 end
 
+-- Ask the agent to stop the running turn; the turn ends once it has.
+local function interrupt(c)
+    if c.cancelling then
+        return
+    end
+    c.cancelling = true
+    status(c, 'cancelling')
+    c.client:cancel(function(err)
+        c.cancelling = false
+        report(c, 'cancel failed: ' .. err.message)
+        status(c, 'running')
+    end)
+end
+
+-- CTRL-C in the chat: cancel the running turn and return the queued prompts to
+-- the draft, also when no turn runs yet (queued while the session loads).
+local function stop()
+    local c = chat
+    local queued = c and #c.prompts > 0
+    if queued then
+        restore(c)
+    end
+    if not c or not c.busy then
+        return queued or warn('No active Boomer turn')
+    end
+    interrupt(c)
+    return true
+end
+
 -- Chat buffer -------------------------------------------------------------------
 
 local function attach(c, view)
@@ -684,7 +713,7 @@ local function attach(c, view)
             view:write(cmd and cmd.name and '[not run]' or '[not sent]')
         end
     end)
-    vim.fn.prompt_setinterrupt(buf, M.cancel)
+    vim.fn.prompt_setinterrupt(buf, stop)
     vim.keymap.set('i', '<CR>', function()
         local text = view:draft()
         local gate = can_submit(c, text)
@@ -700,7 +729,7 @@ local function attach(c, view)
         local enter = vim.api.nvim_replace_termcodes('<CR>', true, false, true)
         vim.api.nvim_feedkeys(enter, 'in', false)
     end, { buffer = buf, desc = 'Submit Boomer prompt' })
-    vim.keymap.set('n', '<C-c>', M.cancel, { buffer = buf, desc = 'Cancel Boomer turn' })
+    vim.keymap.set('n', '<C-c>', stop, { buffer = buf, desc = 'Cancel Boomer turn' })
     -- Copilot tells users to press <S-Tab> to leave plan mode. The completion
     -- menu keeps it; the picker waits for the expr mapping's textlock to end.
     vim.keymap.set({ 'i', 'n', 'x' }, '<S-Tab>', function()
@@ -1305,27 +1334,21 @@ function M.help()
     return true
 end
 
--- Cancel the running turn. Queued prompts return to the draft, also when no
--- turn runs yet (queued while the session loads).
+-- Cancel the running turn and discard the queued prompts and commands (CTRL-C
+-- returns them to the draft instead, see stop()).
 function M.cancel()
     local c = chat
-    local queued = c and #c.prompts > 0
-    if queued then
-        restore(c)
+    local n = c and #c.prompts or 0
+    if n > 0 then
+        c.prompts = {}
+        sync_queue(c)
+        c.view:write(('[cancelled %d queued]'):format(n))
     end
-    if not c or not c.busy then
-        return queued or warn('No active Boomer turn')
+    if c and c.busy then
+        interrupt(c)
+        return true
     end
-    if not c.cancelling then
-        c.cancelling = true
-        status(c, 'cancelling')
-        c.client:cancel(function(err)
-            c.cancelling = false
-            report(c, 'cancel failed: ' .. err.message)
-            status(c, 'running')
-        end)
-    end
-    return true
+    return n > 0 or warn('Nothing to cancel')
 end
 
 -- Stop the agent and wipe the chat buffer.

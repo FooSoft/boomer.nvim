@@ -49,7 +49,7 @@ M.builtins = {
         complete = 'agent',
     },
     help = { desc = 'List commands', gate = 'none' },
-    cancel = { desc = 'Cancel the active turn', gate = 'none', ex = true },
+    cancel = { desc = 'Cancel the active turn and clear the queue', gate = 'none' },
     close = { desc = 'Stop the agent and wipe the chat', gate = 'none', ex = true },
 }
 

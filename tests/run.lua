@@ -366,7 +366,7 @@ test('slash command parsing', function()
         return i.source .. ':' .. i.name
     end, list)
     assert(not vim.tbl_contains(names, 'builtin:help'), 'disabled builtin')
-    assert(not vim.tbl_contains(names, 'builtin:cancel'), 'ex-only hidden in prompt')
+    assert(not vim.tbl_contains(names, 'builtin:close'), 'ex-only hidden in prompt')
     assert(vim.tbl_contains(names, 'user:zed') and not vim.tbl_contains(names, 'agent:zed'))
     assert(names[#names] == 'agent:plan', vim.inspect(names))
     assert(names[1] == 'builtin:agent', vim.inspect(names))
@@ -1544,7 +1544,8 @@ test('codex slash commands', function()
     assert(ran == 'there' and has(buf, 'hi from lua'))
     send(buf, '/help')
     assert(has(buf, '/review - Review a file') and has(buf, '/hi'), text(buf))
-    assert(not has(buf, '/cancel'), 'Ex-only command listed in the prompt')
+    assert(not has(buf, '/close'), 'Ex-only command listed in the prompt')
+    assert(has(buf, '/cancel - Cancel'), text(buf))
 
     -- Ex commands share the table and echo what they send.
     vim.cmd('Boomer model m1')
@@ -1971,7 +1972,7 @@ test('prompt queue', function()
     assert(state(buf).queued == nil and virtual(buf) == '', virtual(buf))
     finish()
 
-    -- Cancel returns the queue to the draft, before the typed text; a prompt
+    -- CTRL-C returns the queue to the draft, before the typed text; a prompt
     -- queued while cancelling is sent after the cancelled turn.
     local cancel = load('codex-early-cancel')
     buf = open(scenario(cancel.steps, prompt('after')))
@@ -1982,7 +1983,8 @@ test('prompt queue', function()
     end
     assert(virtual(buf) == 'Queued: q1\nQueued: q2 (+1 line)', virtual(buf))
     type_draft(buf, 'typing')
-    assert(boomer.cancel() and status(buf, 'cancelling'))
+    keys('<C-c>')
+    assert(status(buf, 'cancelling'))
     assert(draft(buf) == 'q1\n\nq2\nmore\n\ntyping', draft(buf))
     assert(state(buf).queued == nil and virtual(buf) == '')
     type_draft(buf, 'after')
@@ -1992,14 +1994,44 @@ test('prompt queue', function()
     end, 'prompt queued while cancelling; transcript:\n' .. text(buf))
     finish()
 
-    -- Prompts queued while the session starts can be taken back with cancel;
-    -- a failed turn returns the queue to the draft.
+    -- /cancel discards the queue and cancels the turn; a prompt queued after
+    -- it is sent after the cancelled turn.
+    buf = open(scenario(load('codex-early-cancel').steps, prompt('after')))
+    send(buf, 'hello')
+    for _, s in ipairs({ 'q1', 'q2' }) do
+        type_draft(buf, s)
+        enter(buf)
+    end
+    assert(state(buf).queued == 2, 'not queued')
+    type_draft(buf, '/cancel')
+    enter(buf)
+    assert(status(buf, 'cancelling') and draft(buf) == '', draft(buf))
+    assert(state(buf).queued == nil and virtual(buf) == '', virtual(buf))
+    assert(has(buf, 'Prompt: /cancel\n\n[cancelled 2 queued]'), text(buf))
+    type_draft(buf, 'after')
+    enter(buf)
+    await(function()
+        return has(buf, '[cancelled]\n\nPrompt: after') and count(buf, '[completed]') == 1
+    end, '/cancel; transcript:\n' .. text(buf))
+    assert(not has(buf, 'Prompt: q1') and not has(buf, 'Prompt: q2'), text(buf))
+    send(buf, '/cancel')
+    assert(notices[#notices] == 'Nothing to cancel', notices[#notices])
+    finish()
+
+    -- Prompts queued while the session starts can be taken back with CTRL-C,
+    -- or dropped with :Boomer cancel; a failed turn returns the queue to the
+    -- draft.
     local start = steps(base, 1, 5)
     table.insert(start, 5, { op = 'delay', ms = 100 })
     buf = open(scenario(start, prompt('hello', 200, 'boom')))
     keys('Aearly<CR><Esc>')
     assert(status(buf, 'starting') and state(buf).queued == 1, 'not queued while starting')
-    assert(boomer.cancel() and draft(buf) == 'early', draft(buf))
+    keys('<C-c>')
+    assert(draft(buf) == 'early' and state(buf).queued == nil, draft(buf))
+    keys('A<CR><Esc>')
+    assert(state(buf).queued == 1, 'not queued again')
+    assert(boomer.cancel() and state(buf).queued == nil and draft(buf) == '', draft(buf))
+    assert(has(buf, '[cancelled 1 queued]'), text(buf))
     send(buf, 'hello')
     type_draft(buf, 'q1')
     enter(buf)
@@ -2237,7 +2269,8 @@ test('command queue', function()
     type_draft(buf, '/compact')
     enter(buf)
     assert(virtual(buf) == 'Queued: /compact', virtual(buf))
-    assert(boomer.cancel() and draft(buf) == '/compact', draft(buf))
+    keys('<C-c>')
+    assert(draft(buf) == '/compact', draft(buf))
     await(function()
         return status(buf, 'ready')
     end, 'cancelled')
@@ -2644,7 +2677,7 @@ end)
 
 test('user commands and chat edges', function()
     -- Without a chat.
-    assert(not boomer.cancel() and notices[#notices] == 'No active Boomer turn')
+    assert(not boomer.cancel() and notices[#notices] == 'Nothing to cancel')
     assert(not boomer.usage() and notices[#notices] == 'Open a conversation with :Boomer first')
     assert(boomer.help() and vim.bo.filetype == 'help', 'help without a chat')
     vim.cmd.close()
