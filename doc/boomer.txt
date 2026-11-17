@@ -51,12 +51,19 @@ the draft instead of sending it. Queued prompts are shown as `Queued:` lines
 above the prompt (below it while the transcript is empty) and are sent one
 per turn, in order, each once the previous turn ends; only then do they enter
 the transcript. Plain prompts, agent commands and user `prompt` commands
-(|boomer-user-commands|, expanded when queued) can be queued; Boomer's own
-commands cannot. A draft committed with CTRL-J during a turn is queued too and
-marked `[queued]`. CTRL-C or `:Boomer cancel` cancels the turn and puts the
-queued prompts back into the draft, before the text being typed; prompts
-queued after that are sent once the cancelled turn ends. A failed turn, an
-agent exit or a session that fails to load also returns them to the draft.
+(|boomer-user-commands|, expanded when queued) can be queued, and so can
+`/model`, `/effort`, `/mode`, `/settings`, `/permissions` and `/compact`
+(also from |:Boomer| or <S-Tab>): they run between turns, in order with the
+prompts, so a setting applies from the next queued prompt on. Their pickers
+open right away; only the choice is queued, as the command that selects it
+(`/model gpt-5`, `/settings {id} {value}`). Such a command given by |:Boomer|
+or <S-Tab> is shown as the user's message when it runs, as typed ones are.
+`/new`, `/resume` and `/agent` cannot be queued. A draft
+committed with CTRL-J during a turn is queued too and marked `[queued]`.
+CTRL-C or `:Boomer cancel` cancels the turn and puts the queued prompts and
+commands back into the draft, before the text being typed; those queued
+after that run once the cancelled turn ends. A failed turn or queued command,
+an agent exit or a session that fails to load also returns them to the draft.
 
 - One chat per Neovim instance. Hiding the window keeps it; |:bdelete| or
   `:Boomer close` ends it. History is read-only; only the draft is sent.
@@ -125,8 +132,9 @@ Commands that take an argument open a |vim.ui.select()| picker without one.
         experimental collaboration modes); like the model, the mode applies
         from the next turn. In plan mode Codex asks its questions as text.
 
-/settings                                               *boomer-/settings*
-        Pick any setting the agent offers for this session.
+/settings [{id} [{value}]]                              *boomer-/settings*
+        Pick any setting the agent offers for this session, or name it by
+        its ID and pick or give its value: `/settings verbose true`.
 
 /permissions [{preset}]                                 *boomer-/permissions*
         Choose what the agent may do without asking. Codex offers the
@@ -177,9 +185,10 @@ Commands that take an argument open a |vim.ui.select()| picker without one.
 :Boomer close                                           *boomer-close*
         Stop the agent and wipe the chat buffer (Ex only).
 
-Commands that change the session need an idle chat. Run from |:Boomer|,
-`new`, `resume` and `agent` also need an empty draft. Agent and user `prompt`
-commands are queued during a turn (|boomer-queue|).
+Commands that change settings or compact the conversation are queued during
+a turn (|boomer-queue|), like agent and user `prompt` commands. `new`,
+`resume` and `agent` need an idle chat; run from |:Boomer|, they also need an
+empty draft.
 
                                                        *boomer-agent-commands*
 ACP agents advertise their own slash commands (for example Copilot's

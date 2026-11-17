@@ -56,9 +56,15 @@ keep guards and callbacks expanded across lines rather than one-liners).
 - `lua/boomer/commands.lua`: slash-command parsing, the `builtins` table, user
   prompt templates and completion. Each builtin's `gate` names a precondition
   checked by `blocked()` in `init.lua` (`none`, `session`, `idle`, `queue`,
-  `switch`, `agent`). A builtin `name` is executed by calling `M[name]` in
-  `init.lua`, so adding one means a `builtins` entry plus a matching
-  `M.<name>` function.
+  `later`, `switch`, `agent`). A builtin `name` is executed by calling
+  `M[name]` in `init.lua`, so adding one means a `builtins` entry plus a
+  matching `M.<name>` function.
+- The prompt queue (`c.prompts`, `boomer.Queued`) holds only text lines. A
+  `later` command (settings, `/compact`) first resolves its arguments in
+  `M.<name>`, picking what is missing, into a complete line such as
+  `/model gpt-5`; `dispatch()` runs it now or queues it, and `act()` runs it
+  through `exec[name](c, args, done)` (not `M[name]`, so it is never queued
+  again). `done(err)` lets the queue go on or returns it to the draft.
 - `lua/boomer/config.lua`: built-in agent profiles merged field-by-field with
   user profiles; options are validated eagerly in `setup()`.
 - `lua/boomer/status.lua`: the status table rendered for winbar/statusline/
@@ -85,6 +91,10 @@ keep guards and callbacks expanded across lines rather than one-liners).
 
 ## Tests
 
+- **Fix failing tests whatever the task**: `make test` must pass before work
+  is done. A failure that predates the change, or lies outside the feature
+  being worked on, is still fixed (or its cause reported if it cannot be),
+  never skipped or left as "pre-existing".
 - `tests/run.lua` drives the real plugin against a **fake agent**:
   `tests/support/fake` (or `fake.cmd`) runs `tests/support/fake.lua` under
   `nvim -l`, replaying the JSON scenario named by `$BOOMER_SCENARIO`. The fake

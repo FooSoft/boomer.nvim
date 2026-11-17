@@ -56,6 +56,15 @@ function M.choice(setting, input)
     end
 end
 
+-- What to type to select `choice` (the argument of /model, /mode, ...):
+-- its value, or its label where the value is a URI (Copilot's mode IDs).
+---@param choice boomer.Choice
+---@return string
+function M.argument(choice)
+    local value = tostring(choice.value)
+    return value:find('://', 1, true) and choice.label:lower() or value
+end
+
 -- Display label of the current value (without its group), or the raw value.
 ---@param setting boomer.Setting
 ---@return string?

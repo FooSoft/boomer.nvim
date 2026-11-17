@@ -4,6 +4,8 @@
 -- from tests/scenarios over stdio.
 local root = vim.fn.fnamemodify(arg[0], ':p:h:h')
 vim.opt.runtimepath:prepend(root)
+-- doc/tags is not committed; plugin managers generate it, and so do tests.
+vim.cmd.helptags(vim.fn.fnameescape(root .. '/doc'))
 vim.cmd.runtime('plugin/boomer.lua')
 local api = vim.api
 local boomer = require('boomer')
@@ -622,7 +624,7 @@ test('codex chat', function()
     end, 'streamed text')
 
     type_draft(buf, 'keep\nthis')
-    assert(not boomer.settings() and not boomer.resume() and not boomer.new())
+    assert(not boomer.resume() and not boomer.new())
     vim.cmd('wincmd p')
     local code = api.nvim_get_current_win()
     turn(buf)
@@ -855,16 +857,19 @@ test('settings', function()
     table.insert(scenario.steps, 6, response)
     buf = open(scenario, 'copilot')
     ready(buf)
-    local choices = { 'Enabled', 'false', 'Model', 'Family / Two' }
+    -- A setting without a command of its own is named by /settings.
+    send(buf, '/settings nope false')
+    assert(notices[#notices] == 'Unknown setting: nope', notices[#notices])
+    send(buf, '/settings enabled false')
+    await(function()
+        return has(buf, 'Prompt: /settings enabled false\n\n[Setting: enabled = false]')
+    end, 'boolean')
+    local choices = { 'Model', 'Family / Two' }
     n = 0
     vim.ui.select = function(items, opts, cb)
         n = n + 1
         pick(choices[n])(items, opts, cb)
     end
-    assert(boomer.settings())
-    await(function()
-        return has(buf, '[Setting: enabled = false]')
-    end, 'boolean')
     assert(boomer.settings())
     await(function()
         return has(buf, '[Setting: model = Family / Two]')
@@ -2032,6 +2037,211 @@ test('prompt queue', function()
     assert(virtual(buf) == 'Queued: /plan x', virtual(buf))
     turn(buf, 2)
     assert(has(buf, '[completed]\n\nPrompt: /plan x\n\nAgent:\nhello'), text(buf))
+    finish()
+end)
+
+test('command queue', function()
+    local acp = load('acp-basic')
+    local agent_mode = 'https://agentclientprotocol.com/protocol/session-modes#agent'
+    local plan_mode = 'https://agentclientprotocol.com/protocol/session-modes#plan'
+    local function options(model, effort)
+        return {
+            {
+                id = 'model',
+                name = 'Model',
+                category = 'model',
+                type = 'select',
+                currentValue = model,
+                options = { { value = 'm1', name = 'One' }, { value = 'm2', name = 'Two' } },
+            },
+            {
+                id = 'reasoning_effort',
+                name = 'Effort',
+                category = 'thought_level',
+                type = 'select',
+                currentValue = effort,
+                options = { { value = 'low', name = 'low' }, { value = 'high', name = 'high' } },
+            },
+        }
+    end
+    -- An ACP turn for `text`, answered after `ms`.
+    local function prompt(text, ms)
+        local s = steps(acp, 5, 7)
+        s[1].message.params.prompt[1].text = text
+        table.insert(s, 3, { op = 'delay', ms = ms or 0 })
+        return s
+    end
+    local s = steps(acp, 1, 2)
+    vim.list_extend(s, {
+        expect('session/new', { cwd = cwd, mcpServers = {} }, 'new'),
+        notify('session/update', {
+            sessionId = 's1',
+            update = {
+                sessionUpdate = 'available_commands_update',
+                availableCommands = {
+                    { name = 'permissions', input = { hint = '[default|allow-all]' } },
+                },
+            },
+        }),
+        respond({
+            sessionId = 's1',
+            configOptions = options('m1', 'low'),
+            modes = {
+                currentModeId = agent_mode,
+                availableModes = {
+                    { id = agent_mode, name = 'Agent' },
+                    { id = plan_mode, name = 'Plan' },
+                },
+            },
+        }, 'new'),
+    })
+    vim.list_extend(s, prompt('hello', 300))
+    -- Settings change on the agent only once the turn has ended, in order.
+    vim.list_extend(s, {
+        expect('session/set_config_option', { sessionId = 's1', configId = 'model', value = 'm2' }),
+        respond({ configOptions = options('m2', 'low') }),
+        expect(
+            'session/set_config_option',
+            { sessionId = 's1', configId = 'reasoning_effort', value = 'high' }
+        ),
+        respond({ configOptions = options('m2', 'high') }),
+        expect('session/set_mode', { sessionId = 's1', modeId = plan_mode }),
+        respond(vim.empty_dict()),
+    })
+    vim.list_extend(s, prompt('q1'))
+    vim.list_extend(s, prompt('/permissions allow-all'))
+    vim.list_extend(s, prompt('again', 300))
+    vim.list_extend(s, {
+        expect('session/set_config_option', { sessionId = 's1', configId = 'model', value = 'm1' }),
+        {
+            op = 'send_response',
+            message = { id = { ref = 'req' }, error = { code = -32000, message = 'nope' } },
+        },
+    })
+    local buf = open({ version = 1, profile = 'acp-v1', steps = s }, 'copilot')
+    send(buf, 'hello')
+    await(function()
+        return has(buf, 'Agent:\nhello')
+    end, 'streamed text')
+
+    -- Boomer's commands typed during a turn are queued with prompts; pickers
+    -- (/effort, <S-Tab>) open now and queue the choice. The agent's
+    -- /permissions is queued as a prompt.
+    type_draft(buf, '/model m2')
+    enter(buf)
+    vim.ui.select = pick('high')
+    type_draft(buf, '/effort')
+    enter(buf)
+    await(function()
+        return state(buf).queued == 2
+    end, 'picked effort queued')
+    vim.ui.select = pick('Plan')
+    api.nvim_set_current_win(vim.fn.win_findbuf(buf)[1])
+    keys('<S-Tab>')
+    await(function()
+        return state(buf).queued == 3
+    end, 'picked mode queued')
+    vim.ui.select = function()
+        error('unexpected selector')
+    end
+    for _, line in ipairs({ 'q1', '/permissions allow-all' }) do
+        type_draft(buf, line)
+        enter(buf)
+    end
+    -- Commands that replace the session still wait for the turn.
+    type_draft(buf, '/new')
+    enter(buf)
+    assert(draft(buf) == '/new', draft(buf))
+    assert(notices[#notices]:find('A turn is still active', 1, true), notices[#notices])
+    type_draft(buf, '')
+    local queued = 'Queued: /model m2\nQueued: /effort high\nQueued: /mode plan\n'
+        .. 'Queued: q1\nQueued: /permissions allow-all'
+    assert(virtual(buf) == queued, virtual(buf))
+    assert(state(buf).model == 'One' and status(buf, 'running'))
+    turn(buf, 3)
+    assert(
+        has(
+            buf,
+            '[completed]\n\nPrompt: /model m2\n\n[Setting: model = Two]\n\n'
+                .. 'Prompt: /effort high\n\n[Setting: reasoning_effort = high]\n\n'
+                .. 'Prompt: /mode plan\n\n[Setting: $mode = Plan]\n\n'
+                .. 'Prompt: q1\n\nAgent:\nhello\n\n[completed]\n\n'
+                .. 'Prompt: /permissions allow-all\n\nAgent:\nhello\n\n[completed]'
+        ),
+        text(buf)
+    )
+    assert(state(buf).model == 'Two' and state(buf).mode == 'Plan', vim.inspect(state(buf)))
+    assert(state(buf).queued == nil and virtual(buf) == '', virtual(buf))
+
+    -- A committed (<C-j>) command is marked; a failed one returns the rest
+    -- of the queue to the draft.
+    send(buf, 'again')
+    await(function()
+        return count(buf, 'Agent:\nhello') == 4
+    end, 'streamed text')
+    type_draft(buf, '/model One')
+    keys('A<C-j><Esc>')
+    await(function()
+        return has(buf, 'Prompt: /model One\n\n[queued]')
+    end, 'committed command queued; transcript:\n' .. text(buf))
+    type_draft(buf, 'q2')
+    enter(buf)
+    assert(virtual(buf) == 'Queued: /model m1\nQueued: q2', virtual(buf))
+    await(function()
+        return has(buf, 'Error: nope') and draft(buf) == 'q2'
+    end, 'failed setting; draft: ' .. draft(buf))
+    assert(state(buf).model == 'Two' and state(buf).queued == nil)
+    assert(not has(buf, 'Prompt: /model m1'), text(buf))
+    finish()
+
+    -- Native Codex compaction is queued as a turn of its own; cancel returns
+    -- queued commands to the draft.
+    local base = load('codex-basic')
+    local function codex_prompt(text, ms)
+        local t = steps(base, 6, 9)
+        t[1].message.params.input[1].text = text
+        table.insert(t, 4, { op = 'delay', ms = ms or 0 })
+        return t
+    end
+    s = steps(base, 1, 5)
+    vim.list_extend(s, codex_prompt('hello', 300))
+    vim.list_extend(s, {
+        expect('thread/compact/start', { threadId = 's1' }),
+        respond(vim.empty_dict()),
+        notify(
+            'turn/started',
+            { threadId = 's1', turn = { id = 't2', items = {}, status = 'inProgress' } }
+        ),
+        notify(
+            'turn/completed',
+            { threadId = 's1', turn = { id = 't2', items = {}, status = 'completed' } }
+        ),
+    })
+    vim.list_extend(s, codex_prompt('q1'))
+    buf = open({ version = 1, profile = 'codex-v2', steps = s })
+    send(buf, 'hello')
+    for _, line in ipairs({ '/compact', 'q1' }) do
+        type_draft(buf, line)
+        enter(buf)
+    end
+    assert(virtual(buf) == 'Queued: /compact\nQueued: q1', virtual(buf))
+    turn(buf, 2)
+    assert(
+        has(buf, '[completed]\n\nPrompt: /compact\n\n[compacted]\n\nPrompt: q1\n\nAgent:\nhello'),
+        text(buf)
+    )
+    finish()
+
+    buf = open(load('codex-early-cancel'))
+    send(buf, 'hello')
+    type_draft(buf, '/compact')
+    enter(buf)
+    assert(virtual(buf) == 'Queued: /compact', virtual(buf))
+    assert(boomer.cancel() and draft(buf) == '/compact', draft(buf))
+    await(function()
+        return status(buf, 'ready')
+    end, 'cancelled')
+    assert(not has(buf, '[compacted]'), text(buf))
     finish()
 end)
 

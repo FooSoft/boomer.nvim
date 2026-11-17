@@ -12,8 +12,10 @@ nvim --cmd 'set runtimepath+=/path/to/boomer.nvim' -c Boomer
 buffer, in Insert mode. Type after `Prompt: ` and press **Enter** to send;
 **Shift-Enter** adds a line. Replies stream above the
 prompt while you type. Enter during a turn queues the prompt; queued prompts are
-sent one per turn. **Ctrl-C** cancels the active turn and returns queued prompts
-to the draft. Full documentation: `:help boomer`.
+sent one per turn. Setting commands (`/model`, `/permissions`, ...) and `/compact`
+typed during a turn are queued too and run between turns, in order. **Ctrl-C**
+cancels the active turn and returns queued prompts and commands to the draft.
+Full documentation: `:help boomer`.
 
 Commands work as `:Boomer {command}` (with completion) or typed in the prompt as
 `/command` (with `<C-x><C-o>` or `<C-n>` completion; `//text` sends a literal `/text`):
@@ -23,7 +25,7 @@ Commands work as `:Boomer {command}` (with completion) or typed in the prompt as
 | `:Boomer` | Open or focus the chat |
 | `/model [id]`, `/effort [level]` | Pick or set the model / reasoning effort |
 | `/mode [mode]` | Pick or set the mode, e.g. `/mode plan` (Codex), `/mode agent` (leaves Copilot's plan mode) |
-| `/settings` | Pick any session setting the agent offers |
+| `/settings [id [value]]` | Pick or set any session setting the agent offers |
 | `/permissions [preset]` | Read Only / Default / Full Access (Codex); default / assisted / allow-all (Copilot) |
 | `/resume [id]`, `/new` | Load a saved session / start a new one |
 | `/agent [name]` | Switch to another agent profile |

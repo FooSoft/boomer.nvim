@@ -63,16 +63,18 @@ local M = {}
 ---@field asking? boomer.Permission The request being shown.
 ---@field loading? boolean Starting the agent or opening a session.
 ---@field busy? boolean A turn is running.
+---@field applying? boolean A queued command (such as a setting change) is running.
 ---@field cancelling? boolean
 ---@field dead? boolean The agent exited or failed to start.
 ---@field closed? boolean Closed by the user; callbacks are ignored.
 ---@field picks? integer Picker generation; see pick().
 ---@field progress? integer ID of the running progress message.
 
----A queued prompt.
+---A queued prompt, or (without `text`) a command line run by `exec`.
 ---@class boomer.Queued
----@field text string Sent to the agent.
----@field line string As typed; shown when sent, or put back into the draft.
+---@field text? string Sent to the agent.
+---@field line string As typed (commands: with the argument resolved, such as
+---`/mode plan`); shown when sent, or put back into the draft.
 ---@field shown? boolean Already in the transcript (committed by the prompt buffer).
 
 ---@type boomer.Chat?
@@ -131,9 +133,15 @@ end
 -- Prompt queue ------------------------------------------------------------------
 --
 -- Prompts submitted while a turn runs or the session loads wait in c.prompts
--- and are sent one per turn, in order (drain). They are shown as virtual
--- lines until sent. A cancel, a failed turn or the loss of the session puts
+-- and are sent one per turn, in order (drain). Commands such as /model wait
+-- there too and run between turns. They are shown as virtual lines until
+-- sent. A cancel, a failed turn or command, or the loss of the session puts
 -- them back into the draft (restore).
+
+-- Whether new prompts and commands must wait in the queue.
+local function occupied(c)
+    return c.busy or c.loading or c.applying or #c.prompts > 0
+end
 
 local function sync_queue(c)
     c.view:set_queued(vim.tbl_map(function(e)
@@ -306,6 +314,8 @@ end
 --   idle     needs an open session with nothing in progress
 --   queue    prompt text: like idle, but is queued during a turn or while
 --            the session loads
+--   later    commands such as /model: need an open session; their resolved
+--            line is queued during a turn (see dispatch())
 --   switch   replaces the session: starts a chat if there is none, and
 --            refuses to drop an unsent draft (unless the draft is the command
 --            itself, `typed`)
@@ -322,11 +332,11 @@ local function blocked(c, gate, typed)
         return not c.loading and not c.session and 'No session; use /new or /resume' or nil
     elseif c.loading then
         return 'The conversation is still loading'
-    elseif gate == 'session' then
+    elseif gate == 'session' or gate == 'later' then
         return not c.session and 'No session; use /new or /resume' or nil
     elseif pending(c) then
         return 'A permission request is waiting; :Boomer shows it again'
-    elseif c.busy then
+    elseif c.busy or c.applying then
         return 'A turn is still active; wait or use :Boomer cancel'
     elseif switching then
         return not typed and c.view:draft() ~= '' and 'Send or clear the draft before switching'
@@ -450,40 +460,76 @@ end
 -- its own block in the view.
 local echo_id = 0
 
--- Send text as a prompt. `echo` is shown as the user's message when the text
+local function echo(c, text)
+    echo_id = echo_id + 1
+    c.view:message('user', text, 'boomer-echo-' .. echo_id)
+end
+
+-- Send text as a prompt. `user` is shown as the user's message when the text
 -- did not come from the prompt line itself (Ex commands, Lua).
-local function send(c, text, echo)
-    if echo then
-        echo_id = echo_id + 1
-        c.view:message('user', echo, 'boomer-echo-' .. echo_id)
+local function send(c, text, user)
+    if user then
+        echo(c, user)
     end
     turn(c, function(cb)
         c.client:prompt(text, cb)
     end)
 end
 
--- Send the next queued prompt if the session is ready for it.
-function drain(c)
-    if c.busy or c.loading or c.dead or c.closed or not c.session then
-        return
+-- Commands that run between turns, by name: exec[name](c, args, done). They
+-- are given as complete lines, such as `/model gpt-5` (see dispatch()), and
+-- call done(err) when the queue may go on.
+local exec = {}
+
+-- Run a command line; a failed one returns the rest of the queue to the draft.
+local function act(c, e)
+    if not e.shown then
+        echo(c, e.line)
     end
-    local e = table.remove(c.prompts, 1)
-    if e then
-        sync_queue(c)
-        send(c, e.text, not e.shown and e.line or nil)
+    c.applying = true
+    local called = false
+    local function done(err)
+        if called or c.closed or c.dead then
+            return
+        end
+        called, c.applying = true, false
+        if err then
+            report(c, err)
+            restore(c)
+        else
+            drain(c)
+        end
+    end
+    local cmd = commands.parse(e.line)
+    local ok, err = pcall(exec[cmd.name], c, cmd.args, done)
+    if not ok then
+        done(e.line .. ': ' .. tostring(err))
     end
 end
 
--- Send prompt text now, or queue it while a turn runs or the session loads
--- (callers check the `queue` gate). `line` is the text as typed; `shown`: it
--- is already in the transcript.
-local function submit(c, text, line, shown)
-    if not (c.busy or c.loading or #c.prompts > 0) then
-        return send(c, text, not shown and line or nil)
+-- Send the next queued prompt, or run the next queued command, if the
+-- session is ready for it.
+function drain(c)
+    if c.busy or c.loading or c.applying or c.dead or c.closed or not c.session then
+        return
     end
-    c.prompts[#c.prompts + 1] = { text = text, line = line, shown = shown }
+    local e = table.remove(c.prompts, 1)
+    if not e then
+        return
+    end
     sync_queue(c)
-    if shown then
+    if e.text then
+        send(c, e.text, not e.shown and e.line or nil)
+    else
+        act(c, e)
+    end
+end
+
+-- Add an entry to the queue; a line already in the transcript is marked.
+local function enqueue(c, e)
+    c.prompts[#c.prompts + 1] = e
+    sync_queue(c)
+    if e.shown then
         -- Appending inside the prompt callback, before Neovim adds the new
         -- prompt line, would leave an extra blank line after the next write.
         vim.schedule(function()
@@ -493,11 +539,34 @@ local function submit(c, text, line, shown)
     drain(c)
 end
 
+-- Send prompt text now, or queue it while a turn runs or the session loads
+-- (callers check the `queue` gate). `line` is the text as typed; `shown`: it
+-- is already in the transcript.
+local function submit(c, text, line, shown)
+    if not occupied(c) then
+        return send(c, text, not shown and line or nil)
+    end
+    enqueue(c, { text = text, line = line, shown = shown })
+end
+
+-- Run a command line for exec, such as `/model gpt-5`, now, or queue it
+-- after what is in progress (callers check the `later` gate). It is shown as
+-- the user's message when it runs unless `shown` (already in the
+-- transcript).
+local function dispatch(c, line, shown)
+    local e = { line = line, shown = shown }
+    if occupied(c) then
+        return enqueue(c, e)
+    end
+    act(c, e)
+end
+
 -- Commands --------------------------------------------------------------------
 
--- Set while a command typed in the prompt runs: its line is already shown,
--- and the draft (being that line) does not block a switch.
-local typed = false
+-- Set while a command typed in the prompt runs: the draft (being that line)
+-- does not block a switch. `committed`: the line is also in the transcript
+-- (not when it was queued without committing it during a turn).
+local typed, committed = false, false
 
 local function unknown(name)
     return warn(
@@ -538,9 +607,9 @@ local function run_command(c, name, args, from_prompt, shown)
     end
     local line = '/' .. name .. (args ~= '' and (' ' .. args) or '')
     if item.source == 'builtin' then
-        typed = from_prompt
+        typed, committed = from_prompt, from_prompt and shown or false
         local ok, res = pcall(M[name], args ~= '' and args or nil)
-        typed = false
+        typed, committed = false, false
         if not ok then
             error(res, 0)
         end
@@ -621,7 +690,7 @@ local function attach(c, view)
         local gate = can_submit(c, text)
         if not gate then
             return
-        elseif gate == 'queue' and (c.busy or c.loading or #c.prompts > 0) then
+        elseif (gate == 'queue' or gate == 'later') and occupied(c) then
             -- Not committed: a queued prompt enters the transcript when sent.
             if submit_draft(c, text, false) then
                 view:set_draft('')
@@ -882,153 +951,216 @@ function M.open()
     return chat and chat.view.buf
 end
 
-local function apply(c, setting, choice, finish)
-    c.client:configure(setting.id, choice.value, function(e)
-        finish(e and e.message)
-        if not e then
-            c.view:write('[Setting: ' .. setting.id .. ' = ' .. choice.label .. ']')
+-- Settings ----------------------------------------------------------------------
+--
+-- /model, /effort, /mode, /permissions and /settings resolve their argument
+-- first, picking what is missing, into a complete line such as
+-- `/model gpt-5` or `/settings verbose true`. dispatch() runs that line now,
+-- or queues it during a turn; exec then applies it.
+
+local nouns = { model = 'model', effort = 'reasoning effort', mode = 'mode' }
+
+-- The session's settings: cb(err, list). local_only: use what the client
+-- knows without asking the agent (permission presets).
+local function settings_of(c, local_only, cb)
+    if local_only then
+        return cb(nil, c.client:setting_list())
+    end
+    c.client:settings(function(err, list)
+        if not (c.closed or c.dead) then
+            cb(err and err.message, list)
         end
     end)
 end
 
--- Run run(c, list, finish) with the session's settings; finish(err) reports a
--- failure. local_only: use what the client knows without asking the agent.
-local function with_settings(run, local_only)
+-- The setting a command names, and the value given for it: `name` is a
+-- util.categories key, or `settings` with arg `{id} [{value}]`. nil and the
+-- reason if there is none.
+local function find_setting(list, name, arg)
+    if name ~= 'settings' then
+        local s = util.find(list, util.categories[name])
+        if not s or #s.choices == 0 then
+            return nil, nil, 'This agent offers no ' .. (nouns[name] or name) .. ' setting'
+        end
+        return s, arg ~= '' and arg or nil
+    end
+    local id, value = arg:match('^(%S+)%s*(.-)$')
+    for _, s in ipairs(list) do
+        if s.id == id and #s.choices > 0 then
+            return s, value ~= '' and value or nil
+        end
+    end
+    return nil, nil, 'Unknown setting: ' .. tostring(id)
+end
+
+-- The setting's choice for `value`, or nil and the reason.
+local function find_choice(name, setting, value)
+    local choice = util.choice(setting, value)
+    if not choice then
+        return nil, 'Unknown ' .. (nouns[name] or setting.id) .. ': ' .. value
+    end
+    return choice
+end
+
+-- The line that selects `choice`, such as `/model gpt-5`: shown while queued
+-- and put back into the draft. Settings without a command of their own, or
+-- whose command a user command replaces, use `/settings {id} {value}`.
+local function setting_line(setting, choice)
+    for key, category in pairs(util.categories) do
+        if setting.category == category and config.options.commands[key] == nil then
+            return '/' .. key .. ' ' .. util.argument(choice)
+        end
+    end
+    return '/settings ' .. setting.id .. ' ' .. util.argument(choice)
+end
+
+for _, name in ipairs({ 'model', 'effort', 'mode', 'permissions', 'settings' }) do
+    exec[name] = function(c, arg, done)
+        settings_of(c, name == 'permissions', function(err, list)
+            if err then
+                return done(err)
+            end
+            local setting, value, msg = find_setting(list, name, arg)
+            local choice
+            if setting then
+                choice, msg = find_choice(name, setting, value or '')
+            end
+            if not choice then
+                return done(msg)
+            end
+            c.client:configure(setting.id, choice.value, function(e)
+                if not e and not c.closed then
+                    c.view:write('[Setting: ' .. setting.id .. ' = ' .. choice.label .. ']')
+                end
+                done(e and e.message)
+            end)
+        end)
+    end
+end
+
+-- Resolve `/{name} [{arg}]` into a complete line, picking what is missing,
+-- and dispatch it. Errors in what was typed are warnings.
+local function choose_setting(name, arg)
     local c = chat
-    if not check(c, 'idle') then
+    if not check(c, 'later') then
         return
     end
-    local function finish(err)
+    local shown = committed
+    settings_of(c, name == 'permissions', function(err, list)
         if err then
-            report(c, err)
+            return report(c, err)
         end
-    end
-    if local_only then
-        run(c, c.client:setting_list(), finish)
-        return true
-    end
-    c.client:settings(function(err, list)
-        if c.closed or c.dead then
-            return
-        elseif err then
-            return finish(err.message)
+        local function chosen(setting, choice)
+            -- The session may have been lost while a picker was open.
+            if check(c, 'later') then
+                dispatch(c, setting_line(setting, choice), shown)
+            end
         end
-        run(c, list, finish)
+        local function pick_choice(setting)
+            pick(c, setting.choices, {
+                prompt = 'Boomer ' .. (nouns[name] or setting.id) .. ':',
+                format_item = function(item)
+                    return item.label .. (item.value == setting.current and ' [current]' or '')
+                end,
+            }, function(choice, e)
+                if e then
+                    report(c, e)
+                elseif choice then
+                    chosen(setting, choice)
+                end
+            end)
+        end
+        if name == 'settings' and not arg then
+            local settings = {}
+            for _, s in ipairs(list) do
+                if #s.choices > 0 then
+                    local current = s.current ~= nil and (' | ' .. tostring(s.current)) or ''
+                    settings[#settings + 1] =
+                        vim.tbl_extend('force', s, { label = s.label .. current })
+                end
+            end
+            if #settings == 0 then
+                return warn('This session advertises no selectable settings')
+            end
+            return pick(c, settings, { prompt = 'Boomer setting:' }, function(setting, e)
+                if e then
+                    report(c, e)
+                elseif setting then
+                    pick_choice(setting)
+                end
+            end)
+        end
+        local setting, value, msg = find_setting(list, name, arg or '')
+        if not setting then
+            return warn(msg)
+        elseif not value then
+            return pick_choice(setting)
+        end
+        local choice, why = find_choice(name, setting, value)
+        if not choice then
+            return warn(why)
+        end
+        chosen(setting, choice)
     end)
     return true
 end
 
--- Pick a setting, then its value.
-function M.settings()
-    return with_settings(function(c, list, finish)
-        local settings = {}
-        for _, s in ipairs(list) do
-            if #s.choices > 0 then
-                local label = s.label .. (s.current ~= nil and (' | ' .. tostring(s.current)) or '')
-                settings[#settings + 1] = vim.tbl_extend('force', s, { label = label })
-            end
-        end
-        if #settings == 0 then
-            return warn('This session advertises no selectable settings')
-        end
-        pick(c, settings, { prompt = 'Boomer setting:' }, function(setting, e)
-            if not setting then
-                return finish(e)
-            end
-            pick(
-                c,
-                setting.choices,
-                { prompt = 'Boomer ' .. setting.id .. ':' },
-                function(choice, e2)
-                    -- The session may have become busy while the picker was open.
-                    if not choice or not check(c, 'idle') then
-                        return finish(e2)
-                    end
-                    apply(c, setting, choice, finish)
-                end
-            )
-        end)
-    end)
-end
-
--- Set the setting of `key` (a util.categories name) to `value`, or pick it
--- when value is nil. Permission presets are known locally; models and
--- efforts may need the agent.
-local function set_category(key, noun, value)
-    local category = util.categories[key]
-    return with_settings(function(c, list, finish)
-        local setting = util.find(list, category)
-        if not setting or #setting.choices == 0 then
-            return warn('This agent offers no ' .. noun .. ' setting')
-        elseif value then
-            local choice = util.choice(setting, value)
-            if not choice then
-                return warn('Unknown ' .. noun .. ': ' .. value)
-            end
-            return apply(c, setting, choice, finish)
-        end
-        pick(c, setting.choices, {
-            prompt = 'Boomer ' .. noun .. ':',
-            format_item = function(item)
-                return item.label .. (item.value == setting.current and ' [current]' or '')
-            end,
-        }, function(choice, e)
-            if not choice or not check(c, 'idle') then
-                return finish(e)
-            end
-            apply(c, setting, choice, finish)
-        end)
-    end, key == 'permissions')
+-- Pick a setting, then its value; `{id} [{value}]` names them.
+---@param arg? string
+function M.settings(arg)
+    return choose_setting('settings', arg)
 end
 
 ---@param value? string Model ID or name; picks when nil.
 function M.model(value)
-    return set_category('model', 'model', value)
+    return choose_setting('model', value)
 end
 
 ---@param value? string
 function M.effort(value)
-    return set_category('effort', 'reasoning effort', value)
+    return choose_setting('effort', value)
 end
 
 -- The only way out of an ACP agent's plan mode: Copilot does not let the
 -- model leave it.
 ---@param value? string Mode ID or name; picks when nil.
 function M.mode(value)
-    return set_category('mode', 'mode', value)
+    return choose_setting('mode', value)
 end
 
--- Prefer the agent's own command (ACP agents may advertise one). Without a
--- value, pick one of the choices in its hint (Copilot: `allow-all`, ...).
+-- Prefer the agent's own command (ACP agents may advertise one), sent or
+-- queued as a prompt. Without a value, pick one of the choices in its hint
+-- (Copilot: `allow-all`, ...).
 ---@param value? string
 function M.permissions(value)
     local c = chat
     local agent_cmd = c and c.agent_commands.permissions
-    if agent_cmd then
-        if not check(c, 'idle') then
-            return
-        end
-        local values = not value and commands.hint_values(agent_cmd.hint) or {}
-        if #values == 0 then
-            local line = '/permissions' .. (value and (' ' .. value) or '')
-            send(c, line, not typed and line or nil)
-            return true
-        end
-        pick(c, values, {
-            prompt = 'Boomer permissions:',
-            format_item = tostring,
-        }, function(choice, err)
-            if err then
-                report(c, err)
-            elseif choice and check(c, 'idle') then
-                local line = '/permissions ' .. choice
-                send(c, line, line)
-            end
-        end)
+    if not agent_cmd then
+        return choose_setting('permissions', value)
+    elseif not check(c, 'later') then
+        return
+    end
+    local values = not value and commands.hint_values(agent_cmd.hint) or {}
+    if #values == 0 then
+        local line = '/permissions' .. (value and (' ' .. value) or '')
+        submit(c, line, line, committed)
         return true
     end
-    return set_category('permissions', 'permissions', value)
+    pick(c, values, {
+        prompt = 'Boomer permissions:',
+        format_item = tostring,
+    }, function(choice, err)
+        if err then
+            report(c, err)
+        elseif choice and check(c, 'later') then
+            local line = '/permissions ' .. choice
+            submit(c, line, line, false)
+        end
+    end)
+    return true
 end
+
+-- Sessions and agents ------------------------------------------------------------
 
 -- Load session `id`, or pick a saved one.
 ---@param id? string
@@ -1130,26 +1262,33 @@ function M.usage()
     return true
 end
 
--- Compact the conversation. Prefers the agent's own command (it may take
--- focus instructions), else native compaction.
+-- Compact the conversation, now or after the running turn. Prefers the
+-- agent's own command (it may take focus instructions), else native
+-- compaction.
 ---@param focus? string
 function M.compact(focus)
     local c = chat
-    if not check(c, 'idle') then
+    if not check(c, 'later') then
         return
     elseif c.agent_commands.compact then
         local line = '/compact' .. (focus and (' ' .. focus) or '')
-        send(c, line, not typed and line or nil)
+        submit(c, line, line, committed)
     elseif not c.client.compact then
         return warn('This agent cannot compact the conversation')
     elseif focus then
         return warn('This agent takes no compaction instructions')
     else
-        turn(c, function(cb)
-            c.client:compact(cb)
-        end, 'compacted')
+        dispatch(c, '/compact', committed)
     end
     return true
+end
+
+-- Native compaction runs as a turn, which holds the queue until it ends.
+function exec.compact(c, _, done)
+    turn(c, function(cb)
+        c.client:compact(cb)
+    end, 'compacted')
+    done()
 end
 
 -- List the commands in the chat, or open the help without one.
@@ -1339,8 +1478,7 @@ local function arg_candidates(name, again)
         -- It also lists some models twice.
         local out, seen = {}, {}
         for _, choice in ipairs(s and s.choices or {}) do
-            local value = tostring(choice.value)
-            value = value:find('://', 1, true) and choice.label:lower() or value
+            local value = util.argument(choice)
             if not seen[value] then
                 seen[value] = true
                 out[#out + 1] = value

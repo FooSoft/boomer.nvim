@@ -12,34 +12,34 @@ local M = {}
 -- `defer` commands run the agent's command of the same name if it has one,
 -- and then show and complete its hint.
 M.builtins = {
-    model = { desc = 'Choose the model', hint = '[model]', gate = 'idle', complete = 'model' },
+    model = { desc = 'Choose the model', hint = '[model]', gate = 'later', complete = 'model' },
     effort = {
         desc = 'Choose the reasoning effort',
         hint = '[level]',
-        gate = 'idle',
+        gate = 'later',
         complete = 'effort',
     },
     mode = {
         desc = 'Choose the session mode (such as Agent or Plan)',
         hint = '[mode]',
-        gate = 'idle',
+        gate = 'later',
         complete = 'mode',
     },
     resume = { desc = 'Load a saved session', hint = '[id]', gate = 'switch', complete = 'session' },
     new = { desc = 'Start a new session', gate = 'switch' },
     usage = { desc = 'Show context, token and cost usage', gate = 'session' },
-    settings = { desc = 'Change any session setting', gate = 'idle' },
+    settings = { desc = 'Change any session setting', hint = '[id [value]]', gate = 'later' },
     permissions = {
         desc = 'Choose what the agent may do without asking',
         hint = '[preset]',
-        gate = 'idle',
+        gate = 'later',
         complete = 'permissions',
         defer = true,
     },
     compact = {
         desc = 'Summarize the conversation to free context',
         hint = '[focus]',
-        gate = 'idle',
+        gate = 'later',
         defer = true,
     },
     agent = {
