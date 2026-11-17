@@ -2,6 +2,8 @@
 
 Boomer is a minimalist Neovim agent buffer for adults. No emoji, no animations, no forced UX. It talks to Codex through its App Server protocol, and to GitHub Copilot CLI, Gemini CLI, Claude Agent and other agents through the [Agent Client Protocol](https://agentclientprotocol.com) (ACP). The chat is a native prompt buffer: replies stream in above the prompt while you type the next one.
 
+![Boomer chat buffer](img/boomer.png)
+
 Boomer requires Neovim 0.12 or newer and an installed, authenticated agent. It has no dependencies and loads lazily. Agents run with your environment, configuration and credentials, and enforce their own sandbox; Boomer never adds auto-approval flags. Full documentation is available via `:help boomer`.
 
 Features include:
