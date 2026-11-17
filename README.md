@@ -36,6 +36,11 @@ Commands work as `:Boomer {command}` (with completion) or typed in the prompt as
 | `/cancel` | Cancel the turn and clear the queue |
 | `:Boomer close` | Stop the agent |
 
+Each command writes its result into the chat, such as `[Setting: model = GPT-5]`,
+`[Session: new]` or `[Agent: copilot]`; commands run with `:Boomer` show their
+`/command` line first, as if typed. Commands without an argument (`/new`, `/usage`,
+...) refuse one.
+
 Slash commands advertised by ACP agents (such as Copilot's `/plan`) are sent to
 the agent; unknown ones are not sent.
 

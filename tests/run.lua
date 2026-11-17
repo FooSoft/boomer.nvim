@@ -881,7 +881,7 @@ test('settings', function()
     assert(warned(buf, 'Unknown setting: nope'), text(buf))
     send(buf, '/settings enabled false')
     await(function()
-        return has(buf, 'Prompt: /settings enabled false\n\n[Setting: enabled = false]')
+        return has(buf, 'Prompt: /settings enabled false\n\n[Setting: Enabled = false]')
     end, 'boolean')
     local choices = { 'Model', 'Family / Two' }
     n = 0
@@ -1328,12 +1328,14 @@ test('sessions', function()
     assert(labels[1] == 'Saved chat 2 | 2026-11-15 12:00', labels[1])
     ready(buf)
     assert(has(buf, 'Prompt: old question\n\nAgent:\nold answer'), text(buf))
+    assert(has(buf, '\n\n[Session: Saved chat 1]\n\nPrompt: '), text(buf))
     send(buf)
     turn(buf)
     assert(boomer.new())
     local fresh = api.nvim_get_current_buf()
     assert(fresh ~= buf and not api.nvim_buf_is_valid(buf))
     ready(fresh)
+    assert(text(fresh) == '[Session: new]\n\nPrompt: ', text(fresh))
     assert(state(fresh).session == 's3' and last == rpc, 'switch started a new process')
     finish()
 
@@ -1551,6 +1553,7 @@ test('codex slash commands', function()
     await(function()
         return has(buf, 'Usage | codex | m2')
     end, 'usage')
+    assert(count(buf, '/usage') == 1 and has(buf, 'Prompt: /usage\n\nUsage |'), text(buf))
     assert(has(buf, 'Context: 42.0k of 100.0k tokens (42%)'), text(buf))
     assert(has(buf, 'Tokens: 1.5k (1.0k in, 500 out)'), text(buf))
     assert(has(buf, '5h limit: 40% used (resets ' .. os.date('%H:%M', resets) .. ')'), text(buf))
@@ -1571,6 +1574,15 @@ test('codex slash commands', function()
     assert(has(buf, '/review - Review a file') and has(buf, '/hi'), text(buf))
     assert(not has(buf, '/close'), 'Ex-only command listed in the prompt')
     assert(has(buf, '/cancel - Cancel'), text(buf))
+    assert(count(buf, 'Prompt: /help') == 1, 'typed /help echoed again')
+
+    -- Commands without arguments reject them; a typed draft stays editable.
+    type_draft(buf, '/new foo')
+    enter(buf)
+    assert(draft(buf) == '/new foo' and warned(buf, '/new takes no arguments'), text(buf))
+    type_draft(buf, '')
+    vim.cmd('Boomer usage x')
+    assert(warned(buf, '/usage takes no arguments') and count(buf, 'Usage |') == 1, text(buf))
 
     -- Ex commands share the table and echo what they send.
     vim.cmd('Boomer model m1')
@@ -1928,6 +1940,7 @@ test('acp slash commands and defaults', function()
     assert(nbuf ~= buf and not api.nvim_buf_is_valid(buf))
     ready(nbuf)
     assert(state(nbuf).agent == 'codex' and winbar(nbuf):find('^codex'), winbar(nbuf))
+    assert(text(nbuf) == '[Agent: codex]\n\nPrompt: ', text(nbuf))
     finish()
 end)
 
@@ -2065,7 +2078,7 @@ test('prompt queue', function()
     keys('A<CR><Esc>')
     assert(state(buf).queued == 1, 'not queued again')
     assert(boomer.cancel() and state(buf).queued == nil and draft(buf) == '', draft(buf))
-    assert(has(buf, '[cancelled 1 queued]'), text(buf))
+    assert(has(buf, 'Prompt: /cancel\n\n[cancelled 1 queued]'), text(buf))
     send(buf, 'hello')
     type_draft(buf, 'q1')
     enter(buf)
@@ -2229,8 +2242,8 @@ test('command queue', function()
         has(
             buf,
             '[completed]\n\nPrompt: /model m2\n\n[Setting: model = Two]\n\n'
-                .. 'Prompt: /effort high\n\n[Setting: reasoning_effort = high]\n\n'
-                .. 'Prompt: /mode plan\n\n[Setting: $mode = Plan]\n\n'
+                .. 'Prompt: /effort high\n\n[Setting: effort = high]\n\n'
+                .. 'Prompt: /mode plan\n\n[Setting: mode = Plan]\n\n'
                 .. 'Prompt: q1\n\nAgent:\nhello\n\n[completed]\n\n'
                 .. 'Prompt: /permissions allow-all\n\nAgent:\nhello\n\n[completed]'
         ),
@@ -2486,8 +2499,10 @@ test('codex protocol edges', function()
     await(function()
         return has(buf, 'No usage reported yet')
     end, 'usage without rate limits')
+    assert(has(buf, 'Prompt: /usage\n\nUsage |'), text(buf))
     -- Commands that need no agent traffic.
     assert(boomer.resume('s1'), 'resume the current session')
+    assert(has(buf, 'Prompt: /resume s1\n\n[Session: Named (current)]'), text(buf))
     assert(not boomer.compact('focus'))
     assert(warned(buf, 'This agent takes no compaction instructions'), text(buf))
     boomer.permissions('bogus')
@@ -2496,6 +2511,7 @@ test('codex protocol edges', function()
     assert(boomer.agent())
     pause(20)
     assert(state(buf).agent == 'codex' and api.nvim_buf_is_valid(buf), 'same agent replaced')
+    assert(has(buf, 'Prompt: /agent codex\n\n[Agent: codex (current)]'), text(buf))
     vim.ui.select = approve
 
     send(buf, 'hello')

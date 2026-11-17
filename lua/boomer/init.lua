@@ -70,6 +70,7 @@ local M = {}
 ---@field picks? integer Picker generation; see pick().
 ---@field progress? integer ID of the running progress message.
 ---@field said? integer Warnings and errors written to the transcript so far.
+---@field announce? 'agent'|'session' Confirm the switch once the session is ready.
 
 ---A queued prompt, or (without `text`) a command line run by `exec`.
 ---@class boomer.Queued
@@ -481,6 +482,14 @@ local function echo(c, text)
     c.view:message('user', text, 'boomer-echo-' .. echo_id)
 end
 
+-- Show a command's line as the user's message unless it is already in the
+-- transcript (`shown`: typed in the prompt).
+local function echo_command(c, line, shown)
+    if not shown then
+        echo(c, line)
+    end
+end
+
 -- Send text as a prompt. `user` is shown as the user's message when the text
 -- did not come from the prompt line itself (Ex commands, Lua).
 local function send(c, text, user)
@@ -586,6 +595,16 @@ local function unknown(name)
     )
 end
 
+-- Warn and return true if `args` were given to a builtin that takes none
+-- (one without a `hint`).
+local function extra_args(item, args)
+    if item.source == 'builtin' and not item.spec.hint and args ~= '' then
+        warn(('/%s takes no arguments'):format(item.name))
+        return true
+    end
+    return false
+end
+
 -- Context passed to user commands (see :help boomer-user-commands).
 local function context(args)
     local c = chat
@@ -616,6 +635,8 @@ local function run_command(c, name, args, from_prompt, shown)
         commands.find(config.options.commands, c and c.agent_commands or {}, name, from_prompt)
     if not item then
         return unknown(name)
+    elseif extra_args(item, args) then
+        return
     end
     local line = '/' .. name .. (args ~= '' and (' ' .. args) or '')
     if item.source == 'builtin' then
@@ -664,6 +685,8 @@ local function can_submit(c, text)
     local item = commands.find(config.options.commands, c.agent_commands, cmd.name, true)
     if not item then
         return unknown(cmd.name)
+    elseif extra_args(item, cmd.args) then
+        return
     end
     local gate = item.source == 'builtin' and item.spec.gate
         or item.source == 'user' and item.spec.run and 'none'
@@ -810,7 +833,21 @@ local session_fields = {
     cost = vim.NIL,
 }
 
--- Open a session (a new one when id is nil) in the chat's current view.
+-- The open session as /resume names it: its title (reported, or listed by
+-- /resume), or its ID.
+local function session_name(c)
+    local title = c.state.title
+    for _, s in ipairs(not title and c.sessions or {}) do
+        if s.id == c.session then
+            title = s.title
+        end
+    end
+    return type(title) == 'string' and title ~= '' and (title:gsub('[\r\n]+', ' ')) or c.session
+end
+
+-- Open a session (a new one when id is nil) in the chat's current view. Once
+-- it is ready, a pending c.announce ('agent' or 'session', set by the command
+-- that switched) is confirmed in the transcript.
 local function load(c, id)
     c.loading, c.session, c.agent_commands = true, nil, {}
     c.fetched = nil
@@ -822,7 +859,8 @@ local function load(c, id)
         if c.dead or c.closed then
             return
         end
-        c.loading = false
+        local announce = c.announce
+        c.loading, c.announce = false, nil
         if err then
             report(c, err.message)
             status(c, 'failed')
@@ -831,6 +869,11 @@ local function load(c, id)
         end
         c.session = c.client.session
         update(c, { session = c.session, state = 'ready' })
+        if announce == 'agent' then
+            c.view:write('[Agent: ' .. c.opts.name .. ']')
+        elseif announce == 'session' then
+            c.view:write('[Session: ' .. (id and session_name(c) or 'new') .. ']')
+        end
         drain(c)
     end
     if id then
@@ -847,13 +890,22 @@ local function switch(c, id)
     new_view(c)
     place(c, vim.fn.win_findbuf(old.buf))
     vim.api.nvim_buf_delete(old.buf, { force = true })
+    c.announce = 'session'
     load(c, id)
+end
+
+-- Focus the chat and confirm that what a command selects, `what`, is already
+-- active. `line` is shown first unless `shown`.
+local function already(c, line, shown, what)
+    echo_command(c, line, shown)
+    c.view:open()
+    c.view:write('[' .. what .. ' (current)]')
 end
 
 -- Pick a saved session. fresh: the chat has no session yet, so dismissing the
 -- picker starts a new one. A picker that closes silently leaves it without
--- one; /new and /resume still work.
-local function choose(c, fresh)
+-- one; /new and /resume still work. `shown`: the command is in the transcript.
+local function choose(c, fresh, shown)
     local function dismiss(msg)
         if msg then
             warn(msg, c)
@@ -889,7 +941,7 @@ local function choose(c, fresh)
             elseif fresh then
                 load(c, item.id)
             elseif item.id == c.session then
-                c.view:open()
+                already(c, '/resume ' .. item.id, shown, 'Session: ' .. session_name(c))
             elseif check(c, 'switch') then
                 switch(c, item.id)
             end
@@ -898,7 +950,8 @@ local function choose(c, fresh)
 end
 
 -- Start a chat. o.agent: profile name (default agent when nil); o.pick: choose
--- a saved session; o.id: load that session; o.wins: windows to show it in.
+-- a saved session; o.id: load that session; o.wins: windows to show it in;
+-- o.announce: confirm it once ready (see load()).
 local function start(o)
     local profile, perr = config.resolve(o.agent)
     if not profile then
@@ -910,6 +963,7 @@ local function start(o)
         queue = {},
         prompts = {},
         loading = true,
+        announce = o.announce,
         agent_commands = {},
         state = { agent = profile.name, protocol = profile.protocol, cwd = profile.cwd },
     }
@@ -971,7 +1025,9 @@ end
 -- Public API (see :help boomer-lua) -------------------------------------------
 --
 -- Command functions return true when they ran (or started running), and
--- nil after warning otherwise.
+-- nil after warning otherwise. One that runs writes its result into the
+-- transcript, after its line (`/usage`) unless that was typed there; /new,
+-- /resume and /agent write theirs in the new buffer once it is ready.
 
 -- Open or focus the chat, starting one if needed; shows a permission request
 -- again if its picker was closed without an answer. Returns the chat buffer.
@@ -1056,6 +1112,17 @@ local function setting_line(setting, choice)
     return '/settings ' .. setting.id .. ' ' .. util.argument(choice)
 end
 
+-- How a setting is named when it changes: by its command (`effort`), or by
+-- its label if it has none.
+local function setting_name(setting)
+    for key, category in pairs(util.categories) do
+        if setting.category == category then
+            return key
+        end
+    end
+    return setting.label
+end
+
 for _, name in ipairs({ 'model', 'effort', 'mode', 'permissions', 'settings' }) do
     exec[name] = function(c, arg, done)
         settings_of(c, name == 'permissions', function(err, list)
@@ -1072,7 +1139,9 @@ for _, name in ipairs({ 'model', 'effort', 'mode', 'permissions', 'settings' }) 
             end
             c.client:configure(setting.id, choice.value, function(e)
                 if not e and not c.closed then
-                    c.view:write('[Setting: ' .. setting.id .. ' = ' .. choice.label .. ']')
+                    c.view:write(
+                        '[Setting: ' .. setting_name(setting) .. ' = ' .. choice.label .. ']'
+                    )
                 end
                 done(e and e.message)
             end)
@@ -1211,11 +1280,11 @@ function M.resume(id)
     if not check(c, 'switch', typed) then
         return
     elseif not c then
-        start({ pick = not id, id = id })
+        start({ pick = not id, id = id, announce = 'session' })
     elseif not id then
-        choose(c, false)
+        choose(c, false, committed)
     elseif id == c.session then
-        c.view:open()
+        already(c, '/resume ' .. id, committed, 'Session: ' .. session_name(c))
     else
         switch(c, id)
     end
@@ -1227,7 +1296,7 @@ function M.new()
     if not check(chat, 'switch', typed) then
         return
     elseif not chat then
-        start({})
+        start({ announce = 'session' })
     else
         switch(chat)
     end
@@ -1235,9 +1304,8 @@ function M.new()
 end
 
 -- Replace the chat with one for another agent profile, in the same windows,
--- or pick the agent.
----@param name? string
-function M.agent(name)
+-- or pick the agent. `shown`: the command is in the transcript.
+local function agent(name, shown)
     local c = chat
     if not check(c, 'agent', typed) then
         return
@@ -1255,7 +1323,7 @@ function M.agent(name)
         }
         local function chosen(choice)
             if choice and chat == c then
-                M.agent(choice)
+                agent(choice, shown)
             end
         end
         local names = config.installed_agent_names(current)
@@ -1268,19 +1336,24 @@ function M.agent(name)
     elseif not config.options.agents[name] then
         return warn('Unknown agent: ' .. name)
     elseif c and c.opts.name == name and not c.dead then
-        c.view:open()
+        already(c, '/agent ' .. name, shown, 'Agent: ' .. name)
         return true
     end
     if c then
         local old = c.view.buf
         local wins = vim.fn.win_findbuf(old)
         close(c)
-        start({ agent = name, wins = wins })
+        start({ agent = name, wins = wins, announce = 'agent' })
         vim.api.nvim_buf_delete(old, { force = true })
     else
-        start({ agent = name })
+        start({ agent = name, announce = 'agent' })
     end
     return true
+end
+
+---@param name? string
+function M.agent(name)
+    return agent(name, committed)
 end
 
 -- Write context, token, cost and rate-limit usage into the chat. Agents with
@@ -1290,6 +1363,7 @@ function M.usage()
     if not check(c, 'session') then
         return
     end
+    echo_command(c, '/usage', committed)
     local view = c.view
     local function write()
         if not c.closed and c.view == view then
@@ -1340,6 +1414,7 @@ function M.help()
         commands.list(config.options.commands, c and c.agent_commands or {}, c ~= nil)
     )
     if c then
+        echo_command(c, '/help', committed)
         c.view:write(table.concat(lines, '\n'))
     elseif not pcall(vim.cmd.help, 'boomer-commands') then
         vim.notify(table.concat(lines, '\n'), vim.log.levels.INFO, { title = 'Boomer' })
@@ -1352,16 +1427,19 @@ end
 function M.cancel()
     local c = chat
     local n = c and #c.prompts or 0
+    if n == 0 and not (c and c.busy) then
+        return warn('Nothing to cancel', c)
+    end
+    echo_command(c, '/cancel', committed)
     if n > 0 then
         c.prompts = {}
         sync_queue(c)
         c.view:write(('[cancelled %d queued]'):format(n))
     end
-    if c and c.busy then
+    if c.busy then
         interrupt(c)
-        return true
     end
-    return n > 0 or warn('Nothing to cancel', c)
+    return true
 end
 
 -- Stop the agent and wipe the chat buffer.

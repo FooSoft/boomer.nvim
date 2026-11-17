@@ -57,7 +57,8 @@ the transcript. Plain prompts, agent commands and user `prompt` commands
 prompts, so a setting applies from the next queued prompt on. Their pickers
 open right away; only the choice is queued, as the command that selects it
 (`/model gpt-5`, `/settings {id} {value}`). Such a command given by |:Boomer|
-or <S-Tab> is shown as the user's message when it runs, as typed ones are.
+or <S-Tab> is shown as the user's message when it runs (see
+|boomer-command-results|).
 `/new`, `/resume` and `/agent` cannot be queued. A draft
 committed with CTRL-J during a turn is queued too and marked `[queued]`.
 CTRL-C cancels the turn and puts the queued prompts and commands back into
@@ -122,6 +123,28 @@ sessions) are fetched once in the background the first time they are
 completed; the menu or command line then shows them.
 
 Commands that take an argument open a |vim.ui.select()| picker without one.
+Commands shown without an argument below (`/new`, `/usage`, `/help`,
+`/cancel`, `close`) warn if given one, and keep a typed draft.
+
+                                                *boomer-command-results*
+A command that runs writes its result into the chat, after its line. A
+command given by |:Boomer|, <S-Tab> or the |boomer-api| has its line shown as
+the user's message first, as if typed. A command that cannot run only warns.
+Results are system lines such as:
+
+    `[Setting: model = GPT-5]`      a setting changed; named by its command
+                                  (`model`, `effort`, `mode`, `permissions`)
+                                  or by its label (|boomer-/settings|)
+    `[Session: new]`                |boomer-/new|
+    `[Session: {title}]`            |boomer-/resume|: the session's title, or
+                                  its ID
+    `[Agent: {name}]`               |boomer-/agent|
+    `[... (current)]`               `/resume` or `/agent` chose what is
+                                  already open; the chat is kept and focused
+
+`/new`, `/resume` and `/agent` open a fresh buffer: their result is its first
+line (after loaded history), written once the session is ready, and their
+line is not shown. Plain |:Boomer| writes no result.
 
 /model [{model}]                                        *boomer-/model*
         Set the session's model. {model} matches a model ID or its name.
@@ -161,14 +184,16 @@ Commands that take an argument open a |vim.ui.select()| picker without one.
 
 /resume [{id}]                                          *boomer-/resume*
         Load a saved session for the working directory. Without a chat, this
-        starts the default agent first.
+        starts the default agent first. Choosing the open session keeps it
+        and writes `[Session: {title} (current)]`.
 
 /new                                                    *boomer-/new*
         Start a new session with the same agent.
 
 /agent [{name}]                                         *boomer-/agent*
         Stop the current agent and start {name} in the same windows. This
-        also restarts an agent that exited. See |boomer-agents|.
+        also restarts an agent that exited. Choosing the running agent keeps
+        it and writes `[Agent: {name} (current)]`. See |boomer-agents|.
 
 /compact [{focus}]                                      *boomer-/compact*
         Summarize the conversation to free context. If the agent advertises
