@@ -238,14 +238,17 @@ local function blank(buf)
     end
 end
 
--- Text of the live prompt's non-blank virtual lines (the queue).
-local function virtual(buf)
+-- Text of the live prompt's non-blank virtual lines (the queue); `blanks`
+-- keeps the blank ones too, as ''.
+local function virtual(buf, blanks)
     local ns = api.nvim_get_namespaces()['boomer.prompt']
     local out = {}
     for _, m in ipairs(api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })) do
         for _, line in ipairs(m[4].virt_lines or {}) do
             if #line > 0 then
                 out[#out + 1] = line[1][1]
+            elseif blanks then
+                out[#out + 1] = ''
             end
         end
     end
@@ -705,7 +708,7 @@ test('codex chat', function()
 
     keys('Ahello<S-CR>world<CR><Esc>')
     assert(draft(buf) == '' and state(buf).queued == 1, 'Enter during startup did not queue')
-    assert(virtual(buf) == 'Queued: hello (+1 line)', virtual(buf))
+    assert(virtual(buf, true) == '\nQueued: hello (+1 line)', virtual(buf, true))
     -- The queued prompt is sent once the session is ready.
     await(function()
         return status(buf, 'running')
@@ -2040,6 +2043,7 @@ test('prompt queue', function()
     enter(buf)
     assert(draft(buf) == '' and state(buf).queued == 2, draft(buf))
     assert(virtual(buf) == 'Queued: q1\nQueued: /review x', virtual(buf))
+    assert(virtual(buf, true):find('Queued: /review x\n$'), 'no blank line above the prompt')
     assert(winbar(buf):find('| running | 2 queued', 1, true), winbar(buf))
     -- The live prompt is grayed out while the turn runs.
     local function prompt_hl(field, group)

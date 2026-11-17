@@ -229,7 +229,8 @@ end
 -- gray out the label, sign and draft while busy), and
 -- keep one blank line above the prompt: a virtual one when the output does
 -- not end with a blank line (streamed text continues its last line). Queued
--- prompts are virtual lines between that blank line and the prompt. Virtual
+-- prompts are virtual lines between that blank line and the prompt, set off
+-- from the prompt by another blank line. Virtual
 -- lines cannot be ephemeral (decoration provider), so the marks are moved
 -- after every change instead.
 function View:decorate()
@@ -274,9 +275,13 @@ function View:decorate()
         if #lines == 0 then
             return self:mark('queue')
         end
+        table.insert(lines, 1, {})
         return self:mark('queue', api.nvim_buf_line_count(self.buf) - 1, 0, { virt_lines = lines })
     end
     self:mark('queue')
+    if #lines > 0 then
+        lines[#lines + 1] = {}
+    end
     if api.nvim_buf_get_lines(self.buf, row - 1, row, false)[1] ~= '' then
         table.insert(lines, 1, {})
     end
