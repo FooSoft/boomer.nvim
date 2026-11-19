@@ -2258,6 +2258,126 @@ test('prompt queue', function()
     finish()
 end)
 
+test('send now', function()
+    -- Normal-mode <S-CR> sends the draft ahead of the queue, interrupting the
+    -- turn; the rest of the queue follows. So does a user command's send(),
+    -- also while the turn is being cancelled.
+    local base = load('codex-basic')
+    local function prompt(text)
+        local s = steps(base, 8, 11)
+        s[1].message.params.input[1].text = text
+        return s
+    end
+    local s = load('codex-early-cancel')
+    for _, p in ipairs({ 'soon', 'now', 'q1' }) do
+        vim.list_extend(s.steps, prompt(p))
+    end
+    local buf = open(s, nil, {
+        commands = {
+            go = {
+                run = function(args, ctx)
+                    ctx.send(args)
+                end,
+            },
+        },
+    })
+    send(buf, 'hello')
+    type_draft(buf, 'q1')
+    enter(buf)
+    type_draft(buf, 'now')
+    keys('<S-CR>')
+    assert(status(buf, 'cancelling') and draft(buf) == '', draft(buf))
+    type_draft(buf, '/go soon')
+    keys('<S-CR>')
+    assert(virtual(buf) == 'Queued: soon\nQueued: now\nQueued: q1', virtual(buf))
+    turn(buf, 3)
+    assert(
+        has(
+            buf,
+            '[cancelled]\n\nPrompt: soon\n\nAgent:\nhello\n\n[completed]\n\n'
+                .. 'Prompt: now\n\nAgent:\nhello\n\n[completed]\n\n'
+                .. 'Prompt: q1\n\nAgent:\nhello\n\n[completed]'
+        ),
+        text(buf)
+    )
+    finish()
+
+    -- While the session starts, it goes ahead of the queue; there is no turn
+    -- to interrupt.
+    s = steps(base, 1, 7)
+    table.insert(s, 7, { op = 'delay', ms = 100 })
+    vim.list_extend(s, prompt('now'))
+    vim.list_extend(s, prompt('q1'))
+    buf = open({ version = 1, profile = 'codex-v2', steps = s })
+    keys('Aq1<CR><Esc>')
+    type_draft(buf, 'now')
+    keys('<S-CR>')
+    assert(status(buf, 'starting'), 'not starting')
+    assert(virtual(buf) == 'Queued: now\nQueued: q1', virtual(buf))
+    turn(buf, 2)
+    assert(not has(buf, '[cancelled]'), text(buf))
+    assert(has(buf, 'Prompt: now\n\nAgent:\nhello\n\n[completed]\n\nPrompt: q1'), text(buf))
+    finish()
+
+    -- An agent's /permissions goes ahead too, also once chosen in a picker; a
+    -- blank draft interrupts the turn for the next queued prompt, or warns
+    -- without one.
+    local acp = load('acp-basic')
+    local function acp_prompt(text, cancelled)
+        local t = steps(acp, 5, 7)
+        t[1].message.params.prompt[1].text = text
+        if cancelled then
+            t[3].message.result.stopReason = 'cancelled'
+            table.insert(t, 3, {
+                op = 'expect_notification',
+                message = { method = 'session/cancel', params = { sessionId = 's1' } },
+            })
+        end
+        return t
+    end
+    local a = steps(acp, 1, 3)
+    table.insert(
+        a,
+        notify('session/update', {
+            sessionId = 's1',
+            update = {
+                sessionUpdate = 'available_commands_update',
+                availableCommands = {
+                    { name = 'permissions', input = { hint = '[default|allow-all]' } },
+                },
+            },
+        })
+    )
+    vim.list_extend(a, steps(acp, 4, 4))
+    vim.list_extend(a, acp_prompt('hello', true))
+    vim.list_extend(a, acp_prompt('/permissions allow-all', true))
+    vim.list_extend(a, acp_prompt('q1'))
+    buf = open({ version = 1, profile = 'acp-v1', steps = a }, 'copilot')
+    send(buf, 'hello')
+    await(function()
+        return has(buf, 'Agent:\nhello')
+    end, 'streamed text')
+    vim.ui.select = function(items, _, cb)
+        assert(items[2] == 'allow-all', vim.inspect(items))
+        cb(items[2])
+    end
+    type_draft(buf, '/permissions')
+    keys('<S-CR>')
+    await(function()
+        return has(buf, '[cancelled]\n\nPrompt: /permissions allow-all\n\nAgent:\nhello')
+    end, '/permissions sent now; transcript:\n' .. text(buf))
+    type_draft(buf, 'q1')
+    enter(buf)
+    assert(virtual(buf) == 'Queued: q1', virtual(buf))
+    type_draft(buf, '')
+    keys('<S-CR>')
+    turn(buf, 1)
+    assert(has(buf, '[cancelled]\n\nPrompt: q1\n\nAgent:\nhello\n\n[completed]'), text(buf))
+    keys('<S-CR>')
+    assert(warned(buf, 'Nothing to send'), text(buf))
+    finish()
+end)
+
 test('commands during a turn', function()
     local acp = load('acp-basic')
     local agent_mode = 'https://agentclientprotocol.com/protocol/session-modes#agent'

@@ -194,14 +194,15 @@ Stops the agent and wipes the chat buffer.
 
 The chat opens in Insert mode with the cursor after `Prompt: `. A picker opened while you type, such as for `/model` or a permission request, returns to Insert mode once it is answered. The following keys are mapped in the chat buffer only:
 
-| Key                    | Action                                                          |
-| -                      | -                                                               |
-| <kbd>Enter</kbd>       | Sends the draft or runs the command; queues it during a turn    |
-| <kbd>Shift-Enter</kbd> | Adds a line to the draft                                        |
-| <kbd>Ctrl-C</kbd>      | Cancels the active turn and returns queued prompts to the draft |
-| <kbd>Shift-Tab</kbd>   | Switches to the next session mode                               |
+| Key                             | Action                                                              |
+| -                               | -                                                                   |
+| <kbd>Enter</kbd> (Insert)       | Sends the draft or runs the command; queues it during a turn        |
+| <kbd>Shift-Enter</kbd> (Insert) | Adds a line to the draft                                            |
+| <kbd>Shift-Enter</kbd> (Normal) | Sends a prompt now: ahead of queued prompts, interrupting the turn  |
+| <kbd>Ctrl-C</kbd>               | Cancels the active turn and returns queued prompts to the draft     |
+| <kbd>Shift-Tab</kbd>            | Switches to the next session mode                                   |
 
-Prompts sent during a turn, or while the session loads, are queued and sent one per turn, in order; they are shown next to the prompt until they are sent, and the prompt's label, sign and text are grayed out meanwhile. Commands are never queued: they run at once. A draft that cannot be sent or run now, such as `/new` during a turn, stays in the prompt, and a warning says why. Errors and warnings are written into the transcript, and are also shown with `vim.notify` while the chat is hidden.
+Prompts sent during a turn, or while the session loads, are queued and sent one per turn, in order; they are shown next to the prompt until they are sent, and the prompt's label, sign and text are grayed out meanwhile. Commands are never queued: they run at once. To steer the agent mid-turn, press <kbd>Shift-Enter</kbd> in Normal mode: a prompt (including an agent command such as Copilot's `/permissions`) goes ahead of the queue and is sent as soon as the interrupted turn stops, with the rest of the queue after it; with a blank draft, the next queued prompt goes. Boomer's own commands run as with <kbd>Enter</kbd>. A draft that cannot be sent or run now, such as `/new` during a turn, stays in the prompt, and a warning says why. Errors and warnings are written into the transcript, and are also shown with `vim.notify` while the chat is hidden.
 
 The files an agent changes are shown as a `diff` code block after the tool call, or before its permission request so you see the change you approve, whether or not permission is asked. Each change is shown once, highlighted like Vim's diff mode (`BoomerDiffAdd`, `BoomerDiffDelete`, `BoomerDiffText` and `BoomerDiffHunk`, linked to `DiffAdd`, `DiffDelete`, `DiffText` and `DiffChange`), and cut off after [`diff_lines`](#diff_lines) lines.
 

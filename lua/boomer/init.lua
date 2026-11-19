@@ -474,14 +474,33 @@ function drain(c)
     end
 end
 
+-- Ask the agent to stop the running turn; the turn ends once it has.
+local function interrupt(c)
+    if c.cancelling then
+        return
+    end
+    c.cancelling = true
+    status(c, 'cancelling')
+    c.client:cancel(function(err)
+        c.cancelling = false
+        report(c, 'cancel failed: ' .. err.message)
+        status(c, 'running')
+    end)
+end
+
 -- Send prompt text now, or queue it while a turn runs or the session loads
 -- (callers check the `queue` gate). `line` is shown as the user's message.
-local function submit(c, text, line)
+-- `now` puts it at the front of the queue and interrupts the running turn,
+-- so it is sent once the agent has stopped; the rest of the queue follows.
+local function submit(c, text, line, now)
     if not occupied(c) then
         return send(c, text, line)
     end
-    c.prompts[#c.prompts + 1] = { text = text, line = line }
+    table.insert(c.prompts, now and 1 or #c.prompts + 1, { text = text, line = line })
     sync_queue(c)
+    if now and c.busy then
+        interrupt(c)
+    end
     drain(c)
 end
 
@@ -503,8 +522,9 @@ local function extra_args(item, args)
     return false
 end
 
--- Context passed to user `run` commands (see :help boomer-user-commands).
-local function context(args)
+-- Context passed to user `run` commands (see :help boomer-user-commands);
+-- `now` makes send() go ahead of the queue (see submit).
+local function context(args, now)
     local c = chat
     return {
         args = args,
@@ -512,7 +532,7 @@ local function context(args)
         status = M.status(),
         send = function(text)
             if c and chat == c and can_send(c, text) then
-                submit(c, text, text)
+                submit(c, text, text, now)
                 return true
             end
         end,
@@ -526,8 +546,8 @@ end
 
 -- Run a slash command: a builtin (M[name]), an agent command (sent as text)
 -- or a user command (`run` or a `prompt` template). Returns true if it ran,
--- was sent or was queued.
-local function run_command(c, name, args)
+-- was sent or was queued. `now` sends a prompt it makes at once (see submit).
+local function run_command(c, name, args, now)
     local item =
         commands.find(config.options.commands, c and c.agent_commands or {}, name)
     if not item then
@@ -535,7 +555,7 @@ local function run_command(c, name, args)
     elseif extra_args(item, args) then
         return
     elseif item.source == 'builtin' then
-        return M[name](args ~= '' and args or nil)
+        return M[name](args ~= '' and args or nil, now)
     end
     local line = '/' .. name .. (args ~= '' and (' ' .. args) or '')
     local spec = item.spec
@@ -543,7 +563,7 @@ local function run_command(c, name, args)
         if c then
             echo(c, line)
         end
-        local ok, err = pcall(spec.run, args, context(args))
+        local ok, err = pcall(spec.run, args, context(args, now))
         if not ok then
             return warn('/' .. name .. ': ' .. tostring(err))
         end
@@ -555,41 +575,28 @@ local function run_command(c, name, args)
     if not text:find('%S') then
         return warn('/' .. name .. ' produced an empty prompt')
     end
-    submit(c, text, line)
+    submit(c, text, line, now)
     return true
 end
 
 -- Submit a draft typed in the prompt; one that cannot be submitted now goes
 -- back into the draft, after a warning saying why. A blank draft is ignored.
-local function enter(c, view, text)
+-- `now` sends a prompt at once (see submit).
+local function enter(c, view, text, now)
     if not text:find('%S') then
         return unshift(view, text)
     end
     local cmd = commands.parse(text)
     local ok
     if cmd and cmd.name then
-        ok = run_command(c, cmd.name, cmd.args)
+        ok = run_command(c, cmd.name, cmd.args, now)
     elseif can_send(c, cmd and cmd.text or text) then
-        submit(c, cmd and cmd.text or text, text)
+        submit(c, cmd and cmd.text or text, text, now)
         ok = true
     end
     if not ok then
         unshift(view, text)
     end
-end
-
--- Ask the agent to stop the running turn; the turn ends once it has.
-local function interrupt(c)
-    if c.cancelling then
-        return
-    end
-    c.cancelling = true
-    status(c, 'cancelling')
-    c.client:cancel(function(err)
-        c.cancelling = false
-        report(c, 'cancel failed: ' .. err.message)
-        status(c, 'running')
-    end)
 end
 
 -- Cancel the running turn and return the queued prompts to the draft, also
@@ -642,6 +649,19 @@ local function attach(c, view)
     vim.keymap.set('n', '<C-c>', function()
         cancel(c)
     end, { buffer = buf, desc = 'Cancel Boomer turn' })
+    -- Send the draft ahead of the queue, interrupting the turn; a blank draft
+    -- interrupts it for the next queued prompt.
+    vim.keymap.set('n', '<S-CR>', function()
+        local text = view:draft()
+        if text:find('%S') then
+            view:set_draft('')
+            enter(c, view, text, true)
+        elseif #c.prompts == 0 then
+            warn('Nothing to send', c)
+        elseif c.busy then
+            interrupt(c)
+        end
+    end, { buffer = buf, desc = 'Send Boomer prompt now' })
     -- Agents' own UIs switch modes with <S-Tab>. The completion menu keeps it;
     -- the change waits for the expr mapping's textlock to end.
     vim.keymap.set({ 'i', 'n', 'x' }, '<S-Tab>', function()
@@ -992,7 +1012,7 @@ local function apply(c, name, setting, choice)
 end
 
 -- Set the setting of command `name` to `value`, or pick it.
-local function choose_setting(name, value)
+local function choose_setting(name, value, now)
     local c = chat
     if not check(c, 'session') then
         return
@@ -1003,7 +1023,7 @@ local function choose_setting(name, value)
         local values = not value and commands.hint_values(cmd.hint) or {}
         if #values == 0 then
             local line = '/' .. name .. (value and (' ' .. value) or '')
-            submit(c, line, line)
+            submit(c, line, line, now)
             return true
         end
         local opts = { prompt = 'Boomer ' .. nouns[name] .. ':', format_item = tostring }
@@ -1012,7 +1032,7 @@ local function choose_setting(name, value)
                 report(c, err)
             elseif choice and check(c, 'session') then
                 local line = '/' .. name .. ' ' .. choice
-                submit(c, line, line)
+                submit(c, line, line, now)
             end
         end)
         return true
@@ -1061,24 +1081,28 @@ function next_mode()
 end
 
 ---@param value? string Model ID or name; picks when nil.
-function M.model(value)
-    return choose_setting('model', value)
+---@param now? boolean Send an agent command at once (see submit).
+function M.model(value, now)
+    return choose_setting('model', value, now)
 end
 
 ---@param value? string
-function M.effort(value)
-    return choose_setting('effort', value)
+---@param now? boolean
+function M.effort(value, now)
+    return choose_setting('effort', value, now)
 end
 
 -- The only way out of Copilot's plan mode: the model cannot leave it.
 ---@param value? string Mode ID or name; picks when nil.
-function M.mode(value)
-    return choose_setting('mode', value)
+---@param now? boolean
+function M.mode(value, now)
+    return choose_setting('mode', value, now)
 end
 
 ---@param value? string
-function M.permissions(value)
-    return choose_setting('permissions', value)
+---@param now? boolean
+function M.permissions(value, now)
+    return choose_setting('permissions', value, now)
 end
 
 -- Sessions and agents ------------------------------------------------------------
@@ -1180,7 +1204,8 @@ end
 -- Compact the conversation natively (as a turn, so only between turns), or
 -- through the agent's own command, which also takes focus instructions.
 ---@param focus? string
-function M.compact(focus)
+---@param now? boolean Send the agent's command at once (see submit).
+function M.compact(focus, now)
     local c = chat
     if not check(c, 'session') then
         return
@@ -1194,7 +1219,7 @@ function M.compact(focus)
         end, 'compacted')
     elseif c.agent_commands.compact then
         local line = '/compact' .. (focus and (' ' .. focus) or '')
-        submit(c, line, line)
+        submit(c, line, line, now)
     elseif c.client.compact then
         return warn('This agent takes no compaction instructions', c)
     else

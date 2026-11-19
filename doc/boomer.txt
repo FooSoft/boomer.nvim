@@ -58,7 +58,12 @@ Plain prompts, agent commands and user `prompt` commands
 (|boomer-user-commands|) are queued. Boomer's own commands are never queued:
 they run at once, or warn if they cannot run now. CTRL-C and |boomer-/cancel|
 cancel the turn and put the queued prompts back into the draft, before the
-text being typed. A failed turn, an agent exit or a session that fails to
+text being typed. <S-CR> in Normal mode sends a prompt now instead: it goes
+ahead of the queued prompts and the turn is interrupted, so it is sent as
+soon as the agent stops, followed by the rest of the queue. This includes
+agent commands, such as Copilot's `/permissions`; Boomer's own commands run as
+with <CR>. With a blank draft, it interrupts the turn for the next queued
+prompt. A failed turn, an agent exit or a session that fails to
 load also returns them to the draft.
 
 - One chat per Neovim instance. Hiding the window keeps it; |:bdelete| or
@@ -481,6 +486,9 @@ Boomer defines no global mappings. In the chat buffer:
 
   <CR>          (Insert) Send the draft or run the command; a prompt is
                 queued during a turn (|boomer-queue|).
+  <S-CR>        (Normal) Send a prompt now: ahead of queued prompts,
+                interrupting the active turn (|boomer-queue|). With a blank
+                draft, interrupt the turn for the next queued prompt.
   CTRL-C        (Insert, Normal) Cancel the active turn; queued prompts
                 return to the draft, like |boomer-/cancel|.
   <S-Tab>       (Insert, Normal, Visual) Switch to the next session mode
