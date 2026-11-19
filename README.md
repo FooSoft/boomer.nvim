@@ -187,7 +187,7 @@ Stops the agent and wipes the chat buffer.
 
 ## Chat
 
-The chat opens in Insert mode with the cursor after `Prompt: `. The following keys are mapped in the chat buffer only:
+The chat opens in Insert mode with the cursor after `Prompt: `. A picker opened while you type, such as for `/model` or a permission request, returns to Insert mode once it is answered. The following keys are mapped in the chat buffer only:
 
 | Key                    | Action                                                          |
 | -                      | -                                                               |

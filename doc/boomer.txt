@@ -40,8 +40,9 @@ enforces its own sandbox. Boomer never adds auto-approval flags.
 |prompt-buffer| and starts Insert mode at the end of the draft. Type after
 `Prompt: ` and press <CR> to send; <S-CR> adds a line. The sent text stays in
 the transcript as typed, after its `Prompt:` label, and replies stream above
-the prompt, under `Agent:` labels, while you type. A picker opened from the
-prompt, such as for `/model`, returns to Insert mode when it closes. <CR> on
+the prompt, under `Agent:` labels, while you type. A picker opened while you
+type in the prompt, such as for `/model` or a permission request, returns to
+Insert mode once it is answered, after the last of several requests. <CR> on
 a blank draft does nothing. A draft that cannot be sent or run now (a command
 that cannot run yet) stays in the prompt, and a warning says why. CTRL-C
 (Insert or Normal mode) cancels the active turn.

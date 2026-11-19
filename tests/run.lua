@@ -837,6 +837,65 @@ test('pickers return to insert mode', function()
     assert(boomer.model())
     pause(50)
     assert(vim.deep_equal(log, { 'pick n' }), vim.inspect(log))
+    -- Answered in the picker's Terminal mode, like fzf-lua: back to Insert
+    -- once Normal mode is reached.
+    local answer
+    vim.ui.select = function(_, _, cb)
+        log[#log + 1] = 'pick ' .. api.nvim_get_mode().mode
+        vim.cmd.stopinsert()
+        answer = cb
+    end
+    log = {}
+    keys('A/model<CR>', '!')
+    await(function()
+        return answer ~= nil
+    end, 'terminal picker')
+    local term = api.nvim_create_buf(false, true)
+    api.nvim_open_term(term, {})
+    local picker = api.nvim_open_win(term, true, { split = 'below' })
+    vim.schedule(function()
+        log[#log + 1] = 'answer ' .. api.nvim_get_mode().mode
+        api.nvim_win_close(picker, true)
+        answer(nil)
+    end)
+    keys('i', '!')
+    await(function()
+        return #log == 3
+    end, 'terminal picker answer; log: ' .. vim.inspect(log))
+    assert(vim.deep_equal(log, { 'pick i', 'answer t', 'insert' }), vim.inspect(log))
+    assert(api.nvim_get_current_buf() == buf)
+    rawset(vim.cmd, 'startinsert', nil)
+    finish()
+
+    -- The next permission request, shown once one is answered, returns to
+    -- Insert mode after the last one.
+    local scenario = load('codex-permission-accept')
+    local request, response = vim.deepcopy(scenario.steps[10]), vim.deepcopy(scenario.steps[11])
+    request.message.id, response.message.id = 'permission2', 'permission2'
+    table.insert(scenario.steps, 11, request)
+    table.insert(scenario.steps, 13, response)
+    buf = open(scenario)
+    ready(buf)
+    log = {}
+    rawset(vim.cmd, 'startinsert', function(...)
+        log[#log + 1] = api.nvim_get_current_buf() == buf and 'insert' or 'elsewhere'
+        return startinsert(...)
+    end)
+    vim.ui.select = function(items, opts, cb)
+        log[#log + 1] = 'pick ' .. api.nvim_get_mode().mode
+        vim.cmd.stopinsert()
+        vim.defer_fn(function()
+            pick('Allow once')(items, opts, cb)
+        end, 10)
+    end
+    type_draft(buf, 'hello')
+    api.nvim_set_current_win(vim.fn.win_findbuf(buf)[1])
+    keys('A<CR>', '!')
+    turn(buf)
+    await(function()
+        return #log == 3
+    end, 'permissions; log: ' .. vim.inspect(log))
+    assert(vim.deep_equal(log, { 'pick i', 'pick n', 'insert' }), vim.inspect(log))
     rawset(vim.cmd, 'startinsert', nil)
     finish()
 end)

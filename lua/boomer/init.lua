@@ -192,8 +192,13 @@ end
 -- Pickers --------------------------------------------------------------------
 --
 -- vim.ui.select pickers leave Insert mode. A picker opened from Insert mode in
--- the chat (typing /model) returns there when it is answered in Normal mode
--- with the chat window current.
+-- the chat (typing /model, or a permission request while typing) returns
+-- there once it is answered and Normal mode is back in the chat window. A
+-- picker opened while another's answer is handled (the next permission
+-- request) inherits this, and only the last one returns to Insert mode.
+
+-- The picker whose answer is being handled, if any.
+local answering
 
 -- Start Insert mode at the end of the draft if `win` is the current chat window.
 local function insert(win)
@@ -206,20 +211,51 @@ local function insert(win)
     vim.cmd.startinsert({ bang = true })
 end
 
+-- Return to Insert mode in `win` once in Normal mode. Some pickers answer
+-- before leaving their own mode (fzf-lua's terminal is still in Terminal
+-- mode), so then wait for the next mode change.
+local function resume(win)
+    local mode = vim.api.nvim_get_mode().mode
+    if mode == 'n' then
+        insert(win)
+    elseif mode:sub(1, 1) ~= 'i' then
+        vim.api.nvim_create_autocmd('ModeChanged', {
+            once = true,
+            callback = function()
+                if vim.v.event.new_mode == 'n' then
+                    vim.schedule(function()
+                        insert(win)
+                    end)
+                end
+            end,
+        })
+    end
+end
+
 -- vim.ui.select with the callback scheduled once; cb(nil, err) if the UI
 -- throws. The picker opens on the next tick, after the mapping that opened
 -- it. If wanted() is false by then, it is not opened and cb(nil) runs.
 local function select(items, opts, cb, wanted)
-    local mode = vim.api.nvim_get_mode().mode
-    local win = mode == 'i' and vim.bo.filetype == 'boomer' and vim.api.nvim_get_current_win()
+    local picker = {}
+    if answering then
+        picker.win, answering.chained = answering.win, true
+    elseif vim.api.nvim_get_mode().mode:sub(1, 1) == 'i' and vim.bo.filetype == 'boomer' then
+        picker.win = vim.api.nvim_get_current_win()
+    end
     local answered = false
     local function answer(item, err)
         if not answered then
             answered = true
             vim.schedule(function()
-                cb(item, err)
-                if win and vim.api.nvim_get_mode().mode == 'n' then
-                    insert(win)
+                local outer = answering
+                answering = picker
+                local ok, e = pcall(cb, item, err)
+                answering = outer
+                if picker.win and not picker.chained then
+                    resume(picker.win)
+                end
+                if not ok then
+                    error(e, 0)
                 end
             end)
         end
