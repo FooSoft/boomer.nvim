@@ -316,7 +316,8 @@ function(status) returning one) and exactly one of:
 
 `ctx` has `args`, `buf` (chat buffer), `status` (|boomer.status()|),
 `send(text)` (send a prompt like the draft: queued during a turn) and
-`write(text)` (write a note into the chat). Example: >lua
+`write(text)` (write a note into the chat). Once the chat or its session is
+replaced (such as by `/new`), `send()` and `write()` do nothing. Example: >lua
 
     require('boomer').setup({
         commands = {
@@ -381,6 +382,8 @@ same name (`args` is replaced, not appended). Profile fields:
                 defaults to `labels.agent`.
 
 Defaults apply to new sessions only; a loaded session keeps its settings.
+ACP agents get them in order: `model`, `effort`, `mode`, then `options`, so
+an effort only the chosen model offers works.
 A default the agent refuses is reported in the chat. Example: >lua
 
     require('boomer').setup({

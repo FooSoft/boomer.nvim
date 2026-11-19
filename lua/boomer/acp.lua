@@ -103,7 +103,8 @@ function Acp:open(method, params, cb)
             cb(err or { message = 'missing session ID' })
             return
         end
-        self.session, self.options = id, r.configOptions
+        -- A loaded session may report its options while replaying history.
+        self.session, self.options = id, r.configOptions or self.options
         self.modes = type(r.modes) == 'table' and r.modes or nil
         self.models = type(r.models) == 'table' and r.models or nil
         self:report()
@@ -116,45 +117,46 @@ function Acp:open(method, params, cb)
     end)
 end
 
--- Profile defaults (model, effort, mode and raw `options`) apply to new
--- sessions only, one after another. A refused default is reported and the
--- session stays usable.
+-- Profile defaults (model, effort and mode, then raw `options`) apply to new
+-- sessions only, one after another. Each is matched against the settings as
+-- they are by then, as a model may change the efforts offered. A refused
+-- default is reported and the session stays usable.
 function Acp:new_session(cwd, cb)
     self:open('session/new', { cwd = cwd, mcpServers = {} }, function(err)
         if err then
             return cb(err)
         end
         local todo = {}
-        local list = self:settings()
-        for key, category in pairs(util.categories) do
-            local value = self.profile[key]
-            if value then
-                local setting = util.find(list, category)
-                local choice = setting and util.choice(setting, value)
-                if choice then
-                    todo[#todo + 1] = { id = setting.id, value = choice.value }
-                else
-                    self.on.error(
-                        ('default %s: %s is not offered by this agent'):format(key, value)
-                    )
-                end
+        for _, key in ipairs({ 'model', 'effort', 'mode' }) do
+            if self.profile[key] then
+                todo[#todo + 1] = { key = key, value = self.profile[key] }
             end
         end
-        for id, value in pairs(self.profile.options or {}) do
-            todo[#todo + 1] = { id = id, value = value }
+        local raw = vim.tbl_keys(self.profile.options or {})
+        table.sort(raw)
+        for _, id in ipairs(raw) do
+            todo[#todo + 1] = { id = id, value = self.profile.options[id] }
         end
-        -- A stable order keeps the requests predictable.
-        table.sort(todo, function(a, b)
-            return a.id < b.id
-        end)
         local function step(i)
             local t = todo[i]
             if not t then
                 return cb()
             end
-            self:configure(t.id, t.value, function(e)
+            local id, value = t.id, t.value
+            if t.key then
+                local setting = util.find(self:settings(), util.categories[t.key])
+                local choice = setting and util.choice(setting, value)
+                if not choice then
+                    self.on.error(
+                        ('default %s: %s is not offered by this agent'):format(t.key, value)
+                    )
+                    return step(i + 1)
+                end
+                id, value = setting.id, choice.value
+            end
+            self:configure(id, value, function(e)
                 if e then
-                    self.on.error('default ' .. t.id .. ': ' .. e.message)
+                    self.on.error('default ' .. id .. ': ' .. e.message)
                 end
                 step(i + 1)
             end)

@@ -1083,11 +1083,12 @@ test('permission queue and cancel', function()
     table.insert(scenario.steps, 11, request)
     table.insert(scenario.steps, 13, response)
     local open_selectors = {}
-    vim.ui.select = function(items, _, cb)
+    local function defer(items, _, cb)
         open_selectors[#open_selectors + 1] = function()
             cb(items[2])
         end
     end
+    vim.ui.select = defer
     local buf = open(scenario)
     send(buf)
     await(function()
@@ -1101,6 +1102,35 @@ test('permission queue and cancel', function()
     end, 'second selector')
     open_selectors[2]()
     turn(buf)
+    finish()
+
+    -- A request the server resolves while shown lets the next one show.
+    scenario = load('codex-permission-accept')
+    request = vim.deepcopy(scenario.steps[10])
+    response = vim.deepcopy(scenario.steps[11])
+    request.message.id, response.message.id = 'permission2', 'permission2'
+    scenario.steps[11] = request
+    table.insert(scenario.steps, 12, response)
+    table.insert(scenario.steps, 12, {
+        op = 'send_notification',
+        message = {
+            method = 'serverRequest/resolved',
+            params = { threadId = 's1', requestId = 'permission1' },
+        },
+    })
+    -- The first picker is open when its request is resolved.
+    table.insert(scenario.steps, 12, { op = 'delay', ms = 100 })
+    open_selectors = {}
+    vim.ui.select = defer
+    buf = open(scenario)
+    send(buf)
+    await(function()
+        return #open_selectors == 2
+    end, 'selector after resolved request')
+    open_selectors[2]()
+    turn(buf)
+    open_selectors[1]()
+    pause(30)
     finish()
 
     -- A permission picker closed without an answer is shown again by :Boomer.
@@ -1398,6 +1428,26 @@ test('sessions', function()
     local acp = load('acp-sessions')
     local new = load('acp-basic')
     local load_steps = steps(load('acp-resume-replay'), 3)
+    -- Options reported while replaying are kept; the load result has none.
+    table.insert(load_steps[2].messages, {
+        method = 'session/update',
+        params = {
+            sessionId = 's1',
+            update = {
+                sessionUpdate = 'config_option_update',
+                configOptions = {
+                    {
+                        id = 'model',
+                        name = 'Model',
+                        category = 'model',
+                        type = 'select',
+                        currentValue = 'm1',
+                        options = { { value = 'm1', name = 'One' } },
+                    },
+                },
+            },
+        },
+    })
     local scenario = {
         version = 1,
         profile = 'acp-v1',
@@ -1427,6 +1477,7 @@ test('sessions', function()
     ready(buf)
     assert(has(buf, 'Prompt: old question\n\nAgent:\nold answer'), text(buf))
     assert(has(buf, '\n\n[Session: Saved chat 1]\n\nPrompt: draft'), text(buf))
+    assert(state(buf).model == 'One', vim.inspect(state(buf).model))
     type_draft(buf, '')
     send(buf)
     turn(buf)
@@ -1753,12 +1804,13 @@ end)
 
 test('codex modes', function()
     local base = load('codex-basic')
-    local function codex_turn(mode, effort)
+    local function codex_turn(mode, effort, model)
         local s = steps(base, 8, 11)
+        s[1].message.params.model = model
         s[1].message.params.collaborationMode = {
             mode = mode,
             settings = {
-                model = 'm1',
+                model = model or 'm1',
                 reasoning_effort = effort or vim.NIL,
                 developer_instructions = vim.NIL,
             },
@@ -1778,6 +1830,8 @@ test('codex modes', function()
         }),
     })
     vim.list_extend(scenario.steps, codex_turn('default', 'low'))
+    -- m2 does not offer the thread's effort, so the mode gets none.
+    vim.list_extend(scenario.steps, codex_turn('default', nil, 'm2'))
     local buf = open(scenario)
     ready(buf)
     assert(state(buf).mode == nil, vim.inspect(state(buf).mode))
@@ -1803,6 +1857,9 @@ test('codex modes', function()
     assert(has(buf, 'Prompt: /mode default\n\n[Setting: mode = Default]'), text(buf))
     send(buf)
     turn(buf, 2)
+    send(buf, '/model m2')
+    send(buf)
+    turn(buf, 3)
     finish()
 end)
 
@@ -1858,7 +1915,10 @@ test('acp slash commands and defaults', function()
                 category = 'thought_level',
                 type = 'select',
                 currentValue = effort,
-                options = { { value = 'low', name = 'low' }, { value = 'high', name = 'high' } },
+                -- Only m2 offers high: the effort default waits for the model.
+                options = model == 'm2'
+                        and { { value = 'low', name = 'low' }, { value = 'high', name = 'high' } }
+                    or { { value = 'low', name = 'low' } },
             },
             -- Copilot reports an on/off option in the permissions category.
             {
@@ -1909,8 +1969,6 @@ test('acp slash commands and defaults', function()
                 },
             },
         }, 'new'),
-        expect('session/set_mode', { sessionId = 's1', modeId = plan_mode }),
-        respond(vim.empty_dict()),
         expect('session/set_config_option', { sessionId = 's1', configId = 'model', value = 'm2' }),
         respond({ configOptions = options('m2', 'low') }),
         expect(
@@ -1918,6 +1976,8 @@ test('acp slash commands and defaults', function()
             { sessionId = 's1', configId = 'reasoning_effort', value = 'high' }
         ),
         respond({ configOptions = options('m2', 'high') }),
+        expect('session/set_mode', { sessionId = 's1', modeId = plan_mode }),
+        respond(vim.empty_dict()),
     })
     vim.list_extend(
         scenario.steps,
@@ -3165,6 +3225,9 @@ test('completion', function()
     keys('A<C-x><C-o>', '!')
     assert(vim.deep_equal(shown, { 'm1', 'm2' }), vim.inspect(shown))
     assert(vim.deep_equal(vim.fn.getcompletion('Boomer effort ', 'cmdline'), { 'high' }))
+    -- :Boomer takes commands with their slash too.
+    assert(vim.deep_equal(vim.fn.getcompletion('Boomer /model ', 'cmdline'), { 'm1', 'm2' }))
+    assert(vim.deep_equal(vim.fn.getcompletion('Boomer /mod', 'cmdline'), { '/mode', '/model' }))
     type_draft(buf, '')
     -- Sessions are picked, not completed.
     assert(vim.deep_equal(vim.fn.getcompletion('Boomer resume ', 'cmdline'), {}))
@@ -3210,15 +3273,16 @@ test('user commands and chat edges', function()
     assert(boomer.statusline() == '' and boomer.winbar() == '')
 
     local base = load('codex-basic')
-    local scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 11) }
+    local scenario = { version = 1, profile = 'codex-v2', steps = steps(base, 1, 11, base, 6, 7) }
     scenario.steps[8].message.params.input[1].text = 'sent x'
-    local buf
+    local buf, saved
     buf = open(scenario, nil, {
         commands = {
             go = {
                 run = function(args, ctx)
                     assert(ctx.buf == buf and ctx.status.agent == 'codex')
                     assert(ctx.send('sent ' .. args))
+                    saved = ctx
                 end,
             },
             bad = {
@@ -3258,6 +3322,15 @@ test('user commands and chat edges', function()
     api.nvim_set_current_win(vim.fn.win_findbuf(buf)[1])
     api.nvim_win_set_cursor(0, { 1, 0 })
     assert(boomer.omnifunc(1, '') == -3)
+    -- A command's context outlives its session but no longer acts.
+    assert(boomer.new())
+    local fresh = api.nvim_get_current_buf()
+    assert(fresh ~= buf)
+    ready(fresh)
+    assert(not saved.send('late'))
+    saved.write('LATE')
+    pause(30)
+    assert(not has(fresh, 'LATE'), text(fresh))
     finish()
 end)
 

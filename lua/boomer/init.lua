@@ -15,6 +15,7 @@
 ---@field diff fun(diffs: boomer.Diff[]) A tool call's file changes; once per tool call.
 ---@field error fun(msg: string)
 ---@field permission fun(req: boomer.Permission) The agent asks before acting.
+---@field settled fun() The agent withdrew a permission request (set its `done`).
 ---@field exit fun(msg: string) The agent process exited.
 ---@field status fun(fields: table) Status fields to merge; vim.NIL clears one.
 ---@field commands fun(list: { name: string, desc: string?, hint: string? }[]) Agent slash commands.
@@ -171,9 +172,11 @@ local function restore(c)
     unshift(c.view, table.concat(parts, '\n\n'))
 end
 
+-- The agent exited or failed to start: report why, return the queue to the
+-- draft and stop the process (a no-op once it has exited).
 local function fail(c, msg)
     report(c, msg)
-    c.dead, c.loading = true, false
+    c.dead, c.loading, c.queue = true, false, {}
     status(c, 'exited')
     restore(c)
     if c.client then
@@ -417,7 +420,9 @@ local function turn(c, start, done)
     local buf = c.view.buf
     start(function(err, result)
         c.busy, c.cancelling = false, false
-        result = result == 'completed' and done or result or done or 'completed'
+        if result == nil or result == 'completed' then
+            result = done or 'completed'
+        end
         if err then
             report(c, err.message)
             restore(c)
@@ -523,21 +528,26 @@ local function extra_args(item, args)
 end
 
 -- Context passed to user `run` commands (see :help boomer-user-commands);
--- `now` makes send() go ahead of the queue (see submit).
+-- `now` makes send() go ahead of the queue (see submit). Once the session
+-- (and so the view) is replaced, send() and write() do nothing.
 local function context(args, now)
     local c = chat
+    local view = c and c.view
+    local function current()
+        return c and chat == c and c.view == view
+    end
     return {
         args = args,
-        buf = c and c.view.buf,
+        buf = view and view.buf,
         status = M.status(),
         send = function(text)
-            if c and chat == c and can_send(c, text) then
+            if current() and can_send(c, text) then
                 submit(c, text, text, now)
                 return true
             end
         end,
         write = function(text)
-            if c and chat == c then
+            if current() then
                 c.view:write(text)
             end
         end,
@@ -600,16 +610,18 @@ local function enter(c, view, text, now)
 end
 
 -- Cancel the running turn and return the queued prompts to the draft, also
--- when no turn runs yet (queued while the session loads).
-local function cancel(c)
-    local queued = c and #c.prompts > 0
-    if queued then
-        restore(c)
-    end
-    if c and c.busy then
-        interrupt(c)
-    elseif not queued then
+-- when no turn runs yet (queued while the session loads). `line` is echoed
+-- first if there is something to cancel.
+local function cancel(c, line)
+    if not c or #c.prompts == 0 and not c.busy then
         return warn('Nothing to cancel', c)
+    end
+    if line then
+        echo(c, line)
+    end
+    restore(c)
+    if c.busy then
+        interrupt(c)
     end
     return true
 end
@@ -735,6 +747,13 @@ local session_fields = {
     cost = vim.NIL,
 }
 
+-- A session title on one line; nil if it is blank.
+local function one_line(title)
+    if type(title) == 'string' and title:find('%S') then
+        return (title:gsub('[\r\n]+', ' '))
+    end
+end
+
 -- The open session as /resume names it: its title (reported, or listed by
 -- /resume), or its ID.
 local function session_name(c)
@@ -744,7 +763,7 @@ local function session_name(c)
             title = s.title
         end
     end
-    return type(title) == 'string' and title ~= '' and (title:gsub('[\r\n]+', ' ')) or c.session
+    return one_line(title) or c.session
 end
 
 -- Open a session (a new one when id is nil) in the chat's current view. Once
@@ -815,8 +834,9 @@ local function choose(c, fresh)
             load(c)
         end
     end
+    local view = c.view
     c.client:list_sessions(c.opts.cwd, function(err, items)
-        if c.dead or c.closed then
+        if c.dead or c.closed or c.view ~= view then
             return
         elseif err then
             return dismiss(err.message)
@@ -832,7 +852,7 @@ local function choose(c, fresh)
         pick(c, items, {
             prompt = 'Boomer sessions (' .. c.opts.name .. ' | ' .. c.opts.cwd .. '):',
             format_item = function(item)
-                return (item.title:gsub('[\r\n]+', ' '))
+                return (one_line(item.title) or item.id)
                     .. (item.updated and (' | ' .. item.updated) or '')
                     .. (item.id == c.session and ' [current]' or '')
             end,
@@ -890,11 +910,12 @@ local function start(o)
             c.queue[#c.queue + 1] = req
             ask(c)
         end,
+        -- The request shown may be gone: show the next one.
+        settled = function()
+            ask(c)
+        end,
         exit = function(msg)
-            report(c, msg)
-            c.dead, c.loading, c.queue = true, false, {}
-            status(c, 'exited')
-            restore(c)
+            fail(c, msg)
         end,
         status = function(fields)
             if not c.closed then
@@ -953,21 +974,19 @@ end
 function M.open()
     if chat and chat.dead then
         restart(chat, { agent = chat.opts.name })
-    elseif chat then
-        local req = pending(chat)
-        chat.view:open()
-        if req then
-            show(chat, req)
-            return chat.view.buf
-        end
-    else
+    elseif not chat then
         start({})
     end
     if not chat then
         return nil
     end
     chat.view:open()
-    insert(vim.api.nvim_get_current_win())
+    local req = pending(chat)
+    if req then
+        show(chat, req)
+    else
+        insert(vim.api.nvim_get_current_win())
+    end
     return chat.view.buf
 end
 
@@ -1244,12 +1263,7 @@ end
 
 -- Cancel the running turn; queued prompts return to the draft (like CTRL-C).
 function M.cancel()
-    local c = chat
-    if not c or #c.prompts == 0 and not c.busy then
-        return warn('Nothing to cancel', c)
-    end
-    echo(c, '/cancel')
-    return cancel(c)
+    return cancel(chat, '/cancel')
 end
 
 -- Stop the agent and wipe the chat buffer.
@@ -1376,13 +1390,15 @@ local function prefixed(list, lead)
     end, list)
 end
 
--- :Boomer completion: subcommands, then their arguments.
+-- :Boomer completion: subcommands, then their arguments. A subcommand may
+-- start with '/', as in the prompt.
 function M.complete(lead, cmdline, pos)
     local before = cmdline:sub(1, pos):gsub('^%s*%S+%s*', '', 1)
-    local name = before:match('^(%S+)%s')
+    local name = before:match('^/?(%S+)%s')
     if not name then
+        local slash = lead:sub(1, 1) == '/' and '/' or ''
         local names = vim.tbl_map(function(item)
-            return item.name
+            return slash .. item.name
         end, commands.list(config.options.commands, chat and chat.agent_commands or {}))
         return prefixed(names, lead)
     end

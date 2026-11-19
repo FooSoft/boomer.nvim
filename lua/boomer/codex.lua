@@ -328,15 +328,21 @@ end
 function Codex:prompt(text, cb)
     local preset = find_preset(self.permissions)
     -- The mode's settings override the turn's model and effort, so they carry
-    -- the same ones; Codex requires the model.
+    -- the same ones; Codex requires the model. After a model change, the
+    -- thread's effort is kept only if the new model offers it.
     local model = self.model or self.current_model
+    local effort = self.effort or self.current_effort
+    if effort and not self.effort and model ~= self.current_model then
+        local offered = util.choice({ choices = effort_choices(self.models, model) }, effort)
+        effort = offered and effort or nil
+    end
     local collab = self.mode
         and model
         and {
             mode = self.mode,
             settings = {
                 model = model,
-                reasoning_effort = self.effort or self.current_effort or vim.NIL,
+                reasoning_effort = effort or vim.NIL,
                 -- null: the mode's built-in instructions.
                 developer_instructions = vim.NIL,
             },
@@ -529,6 +535,7 @@ function Codex:notification(method, p)
         if req then
             req.done = true
             self.requests[p.requestId] = nil
+            self.on.settled()
         end
         return
     elseif p.threadId ~= self.session then

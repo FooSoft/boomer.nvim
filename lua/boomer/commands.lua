@@ -91,27 +91,21 @@ function M.list(user, agent)
             out[#out + 1] = { name = name, desc = desc, hint = hint, source = source, spec = spec }
         end
     end
-    local function sorted(t)
-        local keys = vim.tbl_keys(t)
-        table.sort(keys)
-        return keys
-    end
-    for _, name in ipairs(sorted(user)) do
-        if user[name] then
-            add(name, user[name].desc, nil, 'user', user[name])
+    for name, spec in pairs(user) do
+        if spec then
+            add(name, spec.desc, nil, 'user', spec)
         end
     end
-    for _, name in ipairs(sorted(M.builtins)) do
-        local b = M.builtins[name]
+    for name, b in pairs(M.builtins) do
         if user[name] == nil then
             add(name, b.desc, b.hint, 'builtin', b)
         end
     end
-    for _, name in ipairs(sorted(agent)) do
-        add(name, agent[name].desc, agent[name].hint, 'agent', agent[name])
+    for name, cmd in pairs(agent) do
+        add(name, cmd.desc, cmd.hint, 'agent', cmd)
     end
+    local order = { builtin = 1, user = 2, agent = 3 }
     table.sort(out, function(a, b)
-        local order = { builtin = 1, user = 2, agent = 3 }
         if a.source ~= b.source then
             return order[a.source] < order[b.source]
         end

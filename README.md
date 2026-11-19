@@ -64,7 +64,7 @@ A profile supports the following fields:
 Specifies user slash commands. Mapping a name to `false` disables the built-in command of that name; user commands also override agent commands. A command has a `desc`, an optional `complete` list (or a function returning one), and exactly one of the following:
 
 *   `prompt`: text sent as a prompt, where `$ARGUMENTS` is replaced by the arguments (appended after a blank line otherwise)
-*   `run`: a `function(args, ctx)` run in Neovim; `ctx.send(text)` sends a prompt (queued during a turn)
+*   `run`: a `function(args, ctx)` run in Neovim; `ctx.send(text)` sends a prompt (queued during a turn) to the session the command ran in
 
 ```lua
 commands = {

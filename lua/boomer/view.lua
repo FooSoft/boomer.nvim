@@ -243,7 +243,7 @@ end
 -- lines cannot be ephemeral (decoration provider), so the marks are moved
 -- after every change instead.
 function View:decorate()
-    local row = self:row()
+    local row, col = self:row()
     self:mark('label', row, 0, {
         end_col = #self:name('user'),
         hl_group = self.busy and 'BoomerPromptBusy' or 'BoomerUserLabel',
@@ -259,7 +259,6 @@ function View:decorate()
     end
     if self.busy then
         local last = api.nvim_buf_line_count(self.buf) - 1
-        local _, col = self:row()
         self:mark('draft', row, col, {
             end_row = last,
             end_col = #api.nvim_buf_get_lines(self.buf, last, last + 1, false)[1],
@@ -353,15 +352,20 @@ function View:gap()
     return #lines == 2 and lines[1] ~= '' and '\n' or ''
 end
 
+-- End the streamed message, if any, and start a new block after the output.
+function View:open_block()
+    self.current = nil
+    local gap = self:gap()
+    if gap ~= '' then
+        self:append(gap)
+    end
+end
+
 -- Write a block of (possibly multiline) text on its own lines, highlighted
 -- with `group` (default BoomerSystem). Ends the streamed message, if any.
 function View:write(text, group)
     if self:valid() then
-        self.current = nil
-        local gap = self:gap()
-        if gap ~= '' then
-            self:append(gap)
-        end
+        self:open_block()
         local row, col, end_row, end_col = self:append(text .. '\n')
         api.nvim_buf_set_extmark(self.buf, ns, row, col, {
             end_row = end_row,
@@ -459,11 +463,7 @@ function View:diff(diffs)
     local fence = ('`'):rep(ticks + 1)
     table.insert(lines, 1, { fence .. 'diff', 'fence' })
     lines[#lines + 1] = { fence, 'fence' }
-    self.current = nil
-    local gap = self:gap()
-    if gap ~= '' then
-        self:append(gap)
-    end
+    self:open_block()
     local texts = vim.tbl_map(function(l)
         return l[1]
     end, lines)

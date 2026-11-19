@@ -28,6 +28,8 @@ local on = {
         end
     end,
     tool = function() end,
+    diff = function() end,
+    settled = function() end,
     error = function(msg)
         io.stderr:write('error: ', msg, '\n')
     end,
