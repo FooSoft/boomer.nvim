@@ -28,6 +28,7 @@ require('boomer').setup({
     window = { position = 'right', width = 0.5, height = 0.5, float = {} },
     labels = { prompt = 'Prompt:', agent = 'Agent:' },
     signs = { prompt = '▌', agent = '▌' },
+    diff_lines = 64,
 })
 ```
 
@@ -98,6 +99,10 @@ Specifies the labels of user and agent messages. The prompt is the user label fo
 #### `signs`
 
 Specifies the signs shown in the sign column next to every line of user messages (and the draft) and agent messages, 1 or 2 cells wide, or `false` to show none. They are drawn by the chat buffer's `statuscolumn`, on every row of wrapped lines, and highlighted with `BoomerUserSign` and `BoomerAssistantSign`, which link to the labels' groups `BoomerUserLabel` and `BoomerAssistantLabel`.
+
+#### `diff_lines`
+
+Specifies the maximum number of lines of a [file change diff](#chat) shown in the chat, or `false` to show diffs in full. Longer diffs end with a `... N more lines` line.
 
 ## Agents
 
@@ -197,6 +202,8 @@ The chat opens in Insert mode with the cursor after `Prompt: `. A picker opened 
 | <kbd>Shift-Tab</kbd>   | Switches to the next session mode                               |
 
 Prompts sent during a turn, or while the session loads, are queued and sent one per turn, in order; they are shown next to the prompt until they are sent, and the prompt's label, sign and text are grayed out meanwhile. Commands are never queued: they run at once. A draft that cannot be sent or run now, such as `/new` during a turn, stays in the prompt, and a warning says why. Errors and warnings are written into the transcript, and are also shown with `vim.notify` while the chat is hidden.
+
+The files an agent changes are shown as a `diff` code block after the tool call, or before its permission request so you see the change you approve, whether or not permission is asked. Each change is shown once, highlighted like Vim's diff mode (`BoomerDiffAdd`, `BoomerDiffDelete`, `BoomerDiffText` and `BoomerDiffHunk`, linked to `DiffAdd`, `DiffDelete`, `DiffText` and `DiffChange`), and cut off after [`diff_lines`](#diff_lines) lines.
 
 ## Status
 

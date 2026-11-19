@@ -308,6 +308,9 @@ test('commands', function()
     assert(not pcall(boomer.setup, { signs = { prompt = 'abc' } }), 'sign too wide')
     assert(not pcall(boomer.setup, { signs = { user = '|' } }))
     assert(not pcall(boomer.setup, { agents = { codex = { label = '' } } }))
+    assert(not pcall(boomer.setup, { diff_lines = 0 }))
+    assert(not pcall(boomer.setup, { diff_lines = 1.5 }))
+    assert(not pcall(boomer.setup, { diff_lines = true }))
 
     local config = require('boomer.config')
     boomer.setup({
@@ -2736,6 +2739,282 @@ test('acp protocol edges', function()
         return status(api.nvim_get_current_buf(), 'no session')
     end, 'load unsupported')
     assert(has(api.nvim_get_current_buf(), 'Error: this agent cannot load sessions'))
+    finish()
+end)
+
+-- Byte ranges of `group` highlights on `row`, as "start-end" strings.
+local function ranges(buf, row, group)
+    local out = {}
+    for _, m in
+        ipairs(api.nvim_buf_get_extmarks(buf, -1, { row, 0 }, { row, -1 }, {
+            details = true,
+        }))
+    do
+        if m[4].hl_group == group then
+            out[#out + 1] = m[3] .. '-' .. m[4].end_col
+        end
+    end
+    return table.concat(out, ' ')
+end
+
+test('diffs', function()
+    -- Rendering: headers with paths relative to the cwd, a cut-off, and
+    -- diff-mode highlights with the changed part of paired lines.
+    local view = new_view()
+    local buf = view.buf
+    view.cwd, view.diff_lines = cwd, 8
+    view:write('[Tool: edit]')
+    view:diff({
+        {
+            from = vim.fs.joinpath(cwd, 'a.lua'),
+            to = vim.fs.joinpath(cwd, 'a.lua'),
+            text = '@@ -1,4 +1,4 @@\n a\n-local x = 1\n+local x = 2\n-é b\n+é c\n-gone\n',
+        },
+        { to = '/elsewhere/n.md', text = '@@ -0,0 +1,2 @@\n+````\n+z\n' },
+    })
+    assert(
+        has(
+            buf,
+            '[Tool: edit]\n\n```diff\n--- a.lua\n+++ a.lua\n@@ -1,4 +1,4 @@\n a\n'
+                .. '-local x = 1\n+local x = 2\n-é b\n+é c\n... 6 more lines\n```\n'
+        ),
+        text(buf)
+    )
+    assert(marks(buf, row_of(buf, '```diff'), 'hl_group', 'BoomerSystem'))
+    assert(marks(buf, row_of(buf, '--- a.lua'), 'hl_group', 'BoomerSystem'))
+    assert(marks(buf, row_of(buf, '@@ -1,4'), 'hl_group', 'BoomerDiffHunk'))
+    assert(marks(buf, row_of(buf, '6 more lines'), 'hl_group', 'BoomerSystem'))
+    local del, add = row_of(buf, '-local x'), row_of(buf, '+local x')
+    assert(marks(buf, del, 'line_hl_group', 'BoomerDiffDelete'))
+    assert(marks(buf, add, 'line_hl_group', 'BoomerDiffAdd'))
+    assert(not marks(buf, row_of(buf, '@@ -1,4') + 1, 'line_hl_group', 'BoomerDiffAdd'))
+    assert(ranges(buf, del, 'BoomerDiffText') == '11-12', ranges(buf, del, 'BoomerDiffText'))
+    assert(ranges(buf, add, 'BoomerDiffText') == '11-12')
+    -- Multibyte characters are not split.
+    assert(ranges(buf, row_of(buf, '-é b'), 'BoomerDiffText') == '4-5')
+    -- Without a cut-off: unpaired lines get no changed part; the fence
+    -- outgrows backticks in the diff; paths elsewhere stay absolute; lines
+    -- without a final newline are paired.
+    view.diff_lines = nil
+    view:diff({
+        { to = '/elsewhere/n.md', text = '@@ -0,0 +1,2 @@\n+````\n+z\n' },
+        { from = vim.fs.joinpath(cwd, 'old'), text = '@@ -1 +0,0 @@\n-y\n' },
+        { from = vim.fs.joinpath(cwd, 'b'), to = '/x/c', text = '' },
+        {
+            from = vim.fs.joinpath(cwd, 'v'),
+            to = vim.fs.joinpath(cwd, 'v'),
+            text = '@@ -1 +1 @@\n-old v\n\\ No newline at end of file\n+new v\n'
+                .. '\\ No newline at end of file\n',
+        },
+    })
+    assert(
+        has(
+            buf,
+            '\n\n`````diff\n--- /dev/null\n+++ /elsewhere/n.md\n@@ -0,0 +1,2 @@\n+````\n+z\n'
+                .. '--- old\n+++ /dev/null\n@@ -1 +0,0 @@\n-y\n--- b\n+++ /x/c\n--- v\n+++ v\n'
+                .. '@@ -1 +1 @@\n-old v\n\\ No newline at end of file\n+new v\n'
+                .. '\\ No newline at end of file\n`````\n'
+        ),
+        text(buf)
+    )
+    assert(ranges(buf, row_of(buf, '+z'), 'BoomerDiffText') == '')
+    assert(ranges(buf, row_of(buf, '-old v'), 'BoomerDiffText') == '1-4')
+    assert(ranges(buf, row_of(buf, '+new v'), 'BoomerDiffText') == '1-4')
+    assert(api.nvim_get_hl(0, { name = 'BoomerDiffText' }).link == 'DiffText')
+    api.nvim_buf_delete(buf, { force = true })
+
+    -- Codex: a diff is shown once per file change item, after its tool line
+    -- (also without a permission request); a request that comes first shows
+    -- the latest streamed patch before it.
+    local scenario = load('codex-fileChange')
+    local function item(method, it)
+        return { method = method, params = { threadId = 's1', item = it } }
+    end
+    local changes = {
+        {
+            path = vim.fs.joinpath(cwd, 'a.lua'),
+            kind = { type = 'update' },
+            diff = '@@ -1 +1 @@\n-x\n+y\n',
+        },
+        { path = vim.fs.joinpath(cwd, 'new.txt'), kind = { type = 'add' }, diff = 'hi\n' },
+        { path = vim.fs.joinpath(cwd, 'gone.txt'), kind = { type = 'delete' }, diff = 'bye\n' },
+        {
+            path = vim.fs.joinpath(cwd, 'm.lua'),
+            kind = { type = 'update', move_path = vim.fs.joinpath(cwd, 'n.lua') },
+            diff = '\n\nMoved to: ' .. vim.fs.joinpath(cwd, 'n.lua'),
+        },
+    }
+    local started = item('item/started', { type = 'fileChange', id = 'tool1', changes = changes })
+    local completed = vim.deepcopy(started)
+    completed.method, completed.params.item.status = 'item/completed', 'completed'
+    local patch = function(diff)
+        return {
+            method = 'item/fileChange/patchUpdated',
+            params = {
+                threadId = 's1',
+                turnId = 't1',
+                itemId = 'tool2',
+                changes = { { path = 'p.lua', kind = { type = 'update' }, diff = diff } },
+            },
+        }
+    end
+    table.insert(scenario.steps, 10, {
+        op = 'send_notification',
+        messages = { started, patch('@@ -1 +1 @@\n-p\n+partial\n'), patch('@@ -1 +1 @@\n-p\n+q\n') },
+    })
+    local second = vim.deepcopy(scenario.steps[11])
+    second.message.id, second.message.params.itemId = 'permission2', 'tool2'
+    local answer = vim.deepcopy(scenario.steps[12])
+    answer.message.id = 'permission2'
+    table.insert(scenario.steps, 13, second)
+    table.insert(scenario.steps, 14, answer)
+    table.insert(scenario.steps, 15, { op = 'send_notification', message = completed })
+    vim.ui.select = pick('Allow once')
+    buf = open(scenario)
+    send(buf)
+    turn(buf)
+    local edit = 'edit '
+        .. table.concat(
+            vim.tbl_map(function(c)
+                return c.path
+            end, changes),
+            ', '
+        )
+    assert(
+        has(
+            buf,
+            '[Tool: '
+                .. edit
+                .. ']\n\n```diff\n--- a.lua\n+++ a.lua\n@@ -1 +1 @@\n-x\n+y\n'
+                .. '--- /dev/null\n+++ new.txt\n@@ -0,0 +1 @@\n+hi\n'
+                .. '--- gone.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-bye\n'
+                .. '--- m.lua\n+++ n.lua\n```\n\nPermission: Apply file changes\n'
+        ),
+        text(buf)
+    )
+    assert(count(buf, '```diff') == 2 and count(buf, 'Permission: Apply') == 2, text(buf))
+    assert(has(buf, '```diff\n--- p.lua\n+++ p.lua\n@@ -1 +1 @@\n-p\n+q\n```\n\nPermission:'))
+    assert(not has(buf, 'partial'), text(buf))
+    finish()
+
+    -- ACP: diffs of auto-approved tool calls are shown once, also when the
+    -- tool call failed; one first sent with a permission request is shown
+    -- before it. Cut off at diff_lines.
+    scenario = load('acp-permission-accept')
+    local function update(u)
+        return { method = 'session/update', params = { sessionId = 's1', update = u } }
+    end
+    local content = {
+        { type = 'content', content = { type = 'text', text = 'ok' } },
+        { type = 'diff', path = vim.fs.joinpath(cwd, 'a.lua'), oldText = 'a\n', newText = 'b\n' },
+    }
+    table.insert(scenario.steps, 6, {
+        op = 'send_notification',
+        messages = {
+            update({ sessionUpdate = 'tool_call', toolCallId = 't0', title = 'Edit a.lua' }),
+            update({ sessionUpdate = 'tool_call_update', toolCallId = 't0', content = content }),
+            update({ sessionUpdate = 'tool_call_update', toolCallId = 't0', content = content }),
+            update({
+                sessionUpdate = 'tool_call',
+                toolCallId = 't9',
+                title = 'Edit same',
+                content = { { type = 'diff', path = '/x', oldText = 's\n', newText = 's\n' } },
+            }),
+            update({
+                sessionUpdate = 'tool_call_update',
+                toolCallId = 't9',
+                status = 'failed',
+                content = { { type = 'diff', path = '/f', oldText = 'f\n', newText = 'g\n' } },
+            }),
+        },
+    })
+    scenario.steps[7].message.params.toolCall.content = {
+        {
+            type = 'diff',
+            path = vim.fs.joinpath(cwd, 'new.lua'),
+            oldText = vim.NIL,
+            newText = 'n\n',
+        },
+    }
+    vim.ui.select = pick('Allow once')
+    buf = open(scenario, 'copilot', { diff_lines = 4 })
+    send(buf)
+    turn(buf)
+    assert(
+        has(
+            buf,
+            '[Tool: Edit a.lua]\n\n```diff\n--- a.lua\n+++ a.lua\n@@ -1 +1 @@\n-a\n... 1 more line\n```\n'
+        ),
+        text(buf)
+    )
+    assert(
+        has(
+            buf,
+            '```diff\n--- /dev/null\n+++ new.lua\n@@ -0,0 +1 @@\n+n\n```\n\nPermission: test\n'
+        ),
+        text(buf)
+    )
+    assert(has(buf, '[Tool: Edit same | failed]\n\n```diff\n--- /f\n'), text(buf))
+    assert(count(buf, '```diff') == 3, 'unchanged file or repeated diff shown: ' .. text(buf))
+    finish()
+
+    -- Copilot CLI: a permission request has only rawInput.diff, a git-style
+    -- diff; the completed tool call then sends every file of the tool call
+    -- as content, where files already shown are skipped.
+    scenario = load('acp-permission-accept')
+    local call = scenario.steps[6].message.params.toolCall
+    call.title = 'Create file'
+    call.rawInput = {
+        fileName = vim.fs.joinpath(cwd, 'b.txt'),
+        diff = table.concat({
+            '',
+            'diff --git a/tmp/b.txt b/tmp/b.txt',
+            'create file mode 100644',
+            'index 0000000..0000000',
+            '--- a/dev/null',
+            '+++ b/tmp/b.txt',
+            'copilot:whole-file-v1',
+            '@@ -1,0 +1,1 @@',
+            '+hello',
+            '',
+            '',
+        }, '\n'),
+    }
+    table.insert(scenario.steps, 8, {
+        op = 'send_notification',
+        message = update({
+            sessionUpdate = 'tool_call_update',
+            toolCallId = 'tool1',
+            status = 'completed',
+            content = {
+                {
+                    type = 'diff',
+                    path = vim.fs.joinpath(cwd, 'b.txt'),
+                    oldText = '',
+                    newText = 'hello\n',
+                },
+                {
+                    type = 'diff',
+                    path = vim.fs.joinpath(cwd, 'gone.txt'),
+                    oldText = 'old\n',
+                    newText = '',
+                },
+            },
+        }),
+    })
+    vim.ui.select = pick('Allow once')
+    buf = open(scenario, 'copilot')
+    send(buf)
+    turn(buf)
+    assert(
+        has(
+            buf,
+            '```diff\n--- /dev/null\n+++ b.txt\n@@ -1,0 +1,1 @@\n+hello\n```\n\nPermission: Create file\n'
+        ),
+        text(buf)
+    )
+    assert(has(buf, '```diff\n--- gone.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n```'), text(buf))
+    assert(count(buf, '```diff') == 2, 'repeated diff shown: ' .. text(buf))
     finish()
 end)
 

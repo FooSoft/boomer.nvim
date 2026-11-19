@@ -47,6 +47,7 @@ local defaults = {
     window = { position = 'right', width = 0.5, height = 0.5, float = {} },
     labels = { prompt = 'Prompt:', agent = 'Agent:' },
     signs = { prompt = '▌', agent = '▌' },
+    diff_lines = 64,
 }
 
 -- Current options; replaced as a whole by set().
@@ -160,6 +161,12 @@ function M.set(opts)
         window = 'table',
         labels = 'table',
         signs = { 'table', 'boolean' },
+        diff_lines = {
+            function(v)
+                return v == false or (type(v) == 'number' and v >= 1 and v % 1 == 0)
+            end,
+            'positive integer or false',
+        },
     })
     if opts.window then
         check('window', opts.window, {
@@ -210,6 +217,9 @@ function M.set(opts)
     o.commands = vim.deepcopy(opts.commands or {})
     if opts.winbar ~= nil then
         o.winbar = opts.winbar
+    end
+    if opts.diff_lines ~= nil then
+        o.diff_lines = opts.diff_lines
     end
     o.agent, o.agents = agent, agents
     M.options = o

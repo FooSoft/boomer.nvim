@@ -26,6 +26,8 @@ local M = {}
 ---@field limits? boomer.Limits Account rate limits, merged from reads and updates.
 ---@field turn? { cb: fun(err: table?, status: string?), id: string?, cancel: function?, interrupting: boolean? }
 ---@field requests table<any, boomer.Permission> Open approval requests by RPC ID.
+---@field changes table<string, table[]> Latest changes of the turn's fileChange items, by item ID.
+---@field shown table<string, boolean> fileChange items whose diff was shown.
 local Codex = {}
 Codex.__index = Codex
 
@@ -36,7 +38,14 @@ Codex.__index = Codex
 ---@param cb fun(err: { message: string }?)
 ---@return boomer.Codex?, string?
 function M.start(profile, on, cb)
-    local self = setmetatable({ on = on, requests = {}, profile = profile, models = {} }, Codex)
+    local self = setmetatable({
+        on = on,
+        requests = {},
+        changes = {},
+        shown = {},
+        profile = profile,
+        models = {},
+    }, Codex)
     local rpc, err = Rpc.start({
         cmd = vim.list_extend(
             { profile.command, 'app-server', '--listen', 'stdio://' },
@@ -406,6 +415,7 @@ function Codex:finish(err, status)
     local turn = self.turn
     if turn then
         self.turn = nil
+        self.changes, self.shown = {}, {}
         self:settle_requests()
         turn.cb(err, status)
     end
@@ -436,6 +446,42 @@ local function tool_title(item)
         value = 'edit ' .. table.concat(paths, ', ')
     end
     return type(value) == 'string' and value or item.type
+end
+
+-- A fileChange item's changes as diffs. Codex sends the whole text of added
+-- and deleted files, and hunks for updates, followed by a "Moved to:" note
+-- for moves.
+---@return boomer.Diff[]
+local function file_diffs(changes)
+    local out = {}
+    for _, change in ipairs(type(changes) == 'table' and changes or {}) do
+        local kind = type(change.kind) == 'table' and change.kind or {}
+        local text = type(change.diff) == 'string' and change.diff or ''
+        local path = tostring(change.path or '?')
+        if kind.type == 'add' then
+            out[#out + 1] = { to = path, text = util.hunks('', text) }
+        elseif kind.type == 'delete' then
+            out[#out + 1] = { from = path, text = util.hunks(text, '') }
+        else
+            local to = type(kind.move_path) == 'string' and kind.move_path or path
+            text = text:gsub('\n*Moved to: [^\n]*\n?$', '')
+            text = text:gsub('^%-%-%- [^\n]*\n%+%+%+ [^\n]*\n', '')
+            out[#out + 1] = { from = path, to = to, text = text }
+        end
+    end
+    return out
+end
+
+-- The diffs of file change item `id`, unless already shown; they count as
+-- shown from now on.
+---@return boomer.Diff[]?
+function Codex:take_diffs(id)
+    if id == nil or self.shown[id] then
+        return nil
+    end
+    local list = util.shown(file_diffs(self.changes[id]))
+    self.shown[id] = list ~= nil or nil
+    return list
 end
 
 -- Merge a rate-limit snapshot into the known windows and report them. Updates
@@ -521,6 +567,12 @@ function Codex:notification(method, p)
     elseif method == 'thread/name/updated' then
         self.title = p.threadName
         self:report()
+    elseif method == 'item/fileChange/patchUpdated' then
+        -- Patches stream in while the model writes them: keep the latest,
+        -- shown once complete (item/started or the approval request).
+        if p.itemId ~= nil then
+            self.changes[p.itemId] = p.changes
+        end
     elseif method == 'item/started' or method == 'item/completed' then
         local item = p.item or {}
         local title = tool_title(item)
@@ -528,6 +580,15 @@ function Codex:notification(method, p)
             self.on.tool(title)
         elseif title and (item.status == 'failed' or item.status == 'declined') then
             self.on.tool(title .. ' | ' .. item.status)
+        end
+        if item.type == 'fileChange' and item.id ~= nil then
+            if type(item.changes) == 'table' and #item.changes > 0 then
+                self.changes[item.id] = item.changes
+            end
+            local diffs = self:take_diffs(item.id)
+            if diffs then
+                self.on.diff(diffs)
+            end
         end
     end
 end
@@ -604,6 +665,9 @@ function Codex:server_request(method, p, reply, id)
     if p.threadId ~= self.session or not self.turn then
         reply(nil, req.deny)
         return
+    end
+    if method == 'item/fileChange/requestApproval' then
+        req.diffs = self:take_diffs(p.itemId)
     end
     req.reply = function(result)
         if not req.done then

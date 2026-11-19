@@ -81,6 +81,18 @@ load also returns them to the draft.
   continues under a new label.
 - The transcript is highlighted as Markdown with treesitter. Markers stay
   visible ('conceallevel' 0), so copied text is the original source.
+                                                        *boomer-diffs*
+- The files an agent changes, added, deleted, moved or edited, are shown as
+  a fenced `diff` block of unified diff hunks, with `---`/`+++` headers
+  (`/dev/null` for added and deleted files, paths relative to the chat's
+  directory). The block follows the tool call, or precedes its permission
+  request, so the change being approved is visible; edits that need no
+  permission are shown too. Each file of a tool call is shown once. Blocks
+  longer than `diff_lines` lines (|boomer-config|) end with
+  `... N more lines`. They are highlighted like |diff-mode|: added and
+  deleted lines get a line background, and the changed middle of a deleted
+  line followed by its added replacement is highlighted on both (see
+  |boomer-highlights|). Diffs are not shown in loaded history.
 - One blank line always separates the prompt from the transcript. When the
   transcript does not end with one (such as while a reply streams), it is a
   virtual line (|nvim_buf_set_extmark()| `virt_lines`), not buffer text.
@@ -248,6 +260,9 @@ option raises an error. Defaults: >lua
         -- Gutter signs of user and agent messages, or false; see
         -- |boomer-signs|.
         signs = { prompt = '▌', agent = '▌' },
+        -- Maximum lines of a file change diff, or false for no limit; see
+        -- |boomer-diffs|.
+        diff_lines = 64,
     })
 <
                                                         *boomer-window*
@@ -492,10 +507,17 @@ Groups are defined with `default = true`; override them with
                         (|boomer-signs|). Links to `BoomerUserLabel`.
   BoomerAssistantSign   Signs of agent messages. Links to
                         `BoomerAssistantLabel`.
-  BoomerSystem          Tool, permission and status lines. Links to
+  BoomerSystem          Tool, permission and status lines, and diff fences,
+                        file headers and cut-off notes. Links to
                         `Comment`.
   BoomerError           Errors. Links to `DiagnosticError`.
   BoomerWarning         Warnings. Links to `DiagnosticWarn`.
+  BoomerDiffAdd         Added lines of diffs (|boomer-diffs|), as a line
+                        background. Links to |hl-DiffAdd|.
+  BoomerDiffDelete      Deleted lines of diffs. Links to |hl-DiffDelete|.
+  BoomerDiffText        The changed part of a deleted line and of the added
+                        line replacing it. Links to |hl-DiffText|.
+  BoomerDiffHunk        `@@` hunk headers of diffs. Links to |hl-DiffChange|.
   BoomerQueued          `Queued:` lines of queued prompts. Links to
                         `Comment`.
   BoomerPromptBusy      The live prompt's label, sign and text while the chat

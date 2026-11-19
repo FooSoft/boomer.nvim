@@ -14,6 +14,12 @@
 ---@field current any Current value (matches a choice's `value`).
 ---@field choices boomer.Choice[]
 
+---A file the agent changes (or asks to change), shown as a unified diff.
+---@class boomer.Diff
+---@field from? string Path before the change; nil for an added file.
+---@field to? string Path after the change; nil for a deleted file.
+---@field text string Hunks ("@@" lines and their bodies), without file headers.
+
 local M = {}
 
 -- Setting categories by the name Boomer uses for them. The names on the right
@@ -75,6 +81,25 @@ function M.current_label(setting)
         end
     end
     return setting.current ~= nil and tostring(setting.current) or nil
+end
+
+-- Hunks turning the file text `old` into `new`; '' when they are equal.
+---@param old string
+---@param new string
+---@return string
+function M.hunks(old, new)
+    return vim.text.diff(old, new, { ctxlen = 3 }) --[[@as string]]
+end
+
+-- The diffs that show something: an edit without hunks is dropped (added,
+-- deleted and moved files are worth a header). nil when none is left.
+---@param list boomer.Diff[]
+---@return boomer.Diff[]?
+function M.shown(list)
+    local out = vim.tbl_filter(function(d)
+        return d.from ~= d.to or d.text:find('%S') ~= nil
+    end, list)
+    return #out > 0 and out or nil
 end
 
 -- Compact token counts: 950, 12.3k, 1.2M.

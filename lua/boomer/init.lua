@@ -12,6 +12,7 @@
 ---@class boomer.Callbacks
 ---@field text fun(role: 'user'|'agent', text: string, id: string?) Message text (streamed).
 ---@field tool fun(title: string) A tool call started (or failed).
+---@field diff fun(diffs: boomer.Diff[]) A tool call's file changes; once per tool call.
 ---@field error fun(msg: string)
 ---@field permission fun(req: boomer.Permission) The agent asks before acting.
 ---@field exit fun(msg: string) The agent process exited.
@@ -25,6 +26,7 @@
 ---@field details string[]
 ---@field choices { label: string, result: any }[] Everything but Deny.
 ---@field deny any Result sent for Deny (and when the picker is dismissed).
+---@field diffs? boomer.Diff[] File changes to approve, unless already shown.
 ---@field reply fun(result: any)
 ---@field done? boolean
 
@@ -392,6 +394,9 @@ function ask(c)
         return ask(c)
     end
     c.asking = req
+    if req.diffs then
+        c.view:diff(req.diffs)
+    end
     local lines = { 'Permission: ' .. req.title }
     vim.list_extend(lines, req.details)
     c.view:write(table.concat(lines, '\n'))
@@ -677,6 +682,8 @@ local function new_view(c, draft)
         signs = config.options.signs
             and { user = config.options.signs.prompt, agent = config.options.signs.agent },
         window = config.options.window,
+        cwd = c.opts.cwd,
+        diff_lines = config.options.diff_lines,
     })
     attach(c, c.view)
     unshift(c.view, draft or '')
@@ -852,6 +859,9 @@ local function start(o)
         end,
         tool = function(title)
             c.view:write('[Tool: ' .. title .. ']')
+        end,
+        diff = function(diffs)
+            c.view:diff(diffs)
         end,
         error = function(msg)
             report(c, msg)

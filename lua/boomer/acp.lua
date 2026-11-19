@@ -24,6 +24,7 @@ local M = {}
 ---@field turn? { cb: fun(err: table?, status: string?) }
 ---@field requests table<any, boomer.Permission> Open permission requests by RPC ID.
 ---@field tools table<string, string> Tool call titles by ID, for failure lines.
+---@field shown table<string, boolean> Files (tool call ID .. "\0" .. path) whose diff was shown.
 local Acp = {}
 Acp.__index = Acp
 
@@ -36,7 +37,8 @@ local cancelled = { outcome = { outcome = 'cancelled' } }
 ---@param cb fun(err: { message: string }?)
 ---@return boomer.Acp?, string?
 function M.start(profile, on, cb)
-    local self = setmetatable({ on = on, requests = {}, tools = {}, profile = profile }, Acp)
+    local self =
+        setmetatable({ on = on, requests = {}, tools = {}, shown = {}, profile = profile }, Acp)
     local rpc, err = Rpc.start({
         cmd = vim.list_extend({ profile.command }, vim.deepcopy(profile.args or {})),
         cwd = profile.cwd,
@@ -206,6 +208,58 @@ local function content_text(content)
         or ('[' .. tostring(content.type) .. ']')
 end
 
+-- The file changes of a tool call (a tool_call, tool_call_update or a
+-- permission request's toolCall): its "diff" content, which has whole file
+-- texts (no old text for new files), or else Copilot CLI's single-file
+-- git-style diff in rawInput.diff, which its permission requests have instead.
+---@return boomer.Diff[]
+local function tool_diffs(t)
+    local list = {}
+    for _, c in ipairs(type(t.content) == 'table' and t.content or {}) do
+        if
+            type(c) == 'table'
+            and c.type == 'diff'
+            and type(c.path) == 'string'
+            and type(c.newText) == 'string'
+        then
+            local old = type(c.oldText) == 'string' and c.oldText or ''
+            list[#list + 1] = {
+                from = old ~= '' and c.path or nil,
+                to = (c.newText ~= '' or old == '') and c.path or nil,
+                text = util.hunks(old, c.newText),
+            }
+        end
+    end
+    local raw = type(t.rawInput) == 'table' and t.rawInput or {}
+    local at = #list == 0 and type(raw.diff) == 'string' and raw.diff:find('\n@@ ')
+    local path = type(raw.fileName) == 'string' and raw.fileName
+    if at and path then
+        list[1] = {
+            from = not raw.diff:find('\n%-%-%- a?/?dev/null\n') and path or nil,
+            to = not raw.diff:find('\n%+%+%+ b?/?dev/null\n') and path or nil,
+            text = raw.diff:sub(at + 1):gsub('\n+$', '') .. '\n',
+        }
+    end
+    return list
+end
+
+-- The diffs of a tool call not shown yet; they count as shown from now on.
+-- Agents may send one permission request per file under the same tool call
+-- ID, then all files again when it completes, so files are tracked one by one.
+---@return boomer.Diff[]?
+function Acp:take_diffs(t)
+    local function key(d)
+        return tostring(t.toolCallId) .. '\0' .. (d.from or d.to)
+    end
+    local list = util.shown(vim.tbl_filter(function(d)
+        return not self.shown[key(d)]
+    end, tool_diffs(t)))
+    for _, d in ipairs(t.toolCallId ~= nil and list or {}) do
+        self.shown[key(d)] = true
+    end
+    return list
+end
+
 -- Handle one session/update for the current session.
 function Acp:update(u)
     local kind = u.sessionUpdate
@@ -250,12 +304,19 @@ function Acp:update(u)
     elseif self.loading then
         -- Replayed history shows messages only.
         return
-    elseif kind == 'tool_call' then
-        local title = tostring(u.title or u.kind or 'tool')
-        self.tools[u.toolCallId or title] = title
-        self.on.tool(title)
-    elseif kind == 'tool_call_update' and u.status == 'failed' then
-        self.on.tool(tostring(u.title or self.tools[u.toolCallId] or 'tool') .. ' | failed')
+    elseif kind == 'tool_call' or kind == 'tool_call_update' then
+        if kind == 'tool_call' then
+            local title = tostring(u.title or u.kind or 'tool')
+            self.tools[u.toolCallId or title] = title
+            self.on.tool(title)
+        elseif u.status == 'failed' then
+            self.on.tool(tostring(u.title or self.tools[u.toolCallId] or 'tool') .. ' | failed')
+        end
+        -- A failed tool call may still have changed files.
+        local diffs = self:take_diffs(u)
+        if diffs then
+            self.on.diff(diffs)
+        end
     end
 end
 
@@ -292,7 +353,7 @@ function Acp:finish(err, status)
     local turn = self.turn
     if turn then
         self.turn = nil
-        self.tools = {}
+        self.tools, self.shown = {}, {}
         self:settle_requests()
         turn.cb(err, status)
     end
@@ -321,6 +382,7 @@ function Acp:server_request(method, p, reply, id)
     if tool.kind then
         req.details[1] = 'kind: ' .. tostring(tool.kind)
     end
+    req.diffs = self:take_diffs(tool)
     for _, o in ipairs(p.options or {}) do
         local result = { outcome = { outcome = 'selected', optionId = o.optionId } }
         if o.kind == 'reject_once' and not req.deny then

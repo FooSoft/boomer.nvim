@@ -7,8 +7,8 @@
 -- of the editable draft; everything above it is output. Agent messages are
 -- their label on its own line followed by the text; user messages are the
 -- prompt (the user label and a space) followed by the text, as Neovim
--- commits submitted drafts. Extmarks in `ns` highlight labels and system
--- lines; extmarks in `sign_ns` span messages to show their role's sign;
+-- commits submitted drafts. Extmarks in `ns` highlight labels, system lines
+-- and diffs; extmarks in `sign_ns` span messages to show their role's sign;
 -- extmarks in `prompt_ns` decorate the live prompt and follow it
 -- (View:decorate). Nothing else tracks positions.
 local api = vim.api
@@ -29,6 +29,8 @@ local prompt_ns = api.nvim_create_namespace('boomer.prompt')
 ---@field marks table<string, integer> Extmark IDs of the live prompt's decorations.
 ---@field queued string[] Queued prompts, shown as virtual lines (View:set_queued).
 ---@field busy? boolean The agent is busy: the live prompt is grayed out (View:set_busy).
+---@field cwd? string Diff paths below it are shown relative to it.
+---@field diff_lines? integer Lines of a tool call's diff shown; nil for all.
 local View = {}
 View.__index = View
 
@@ -55,6 +57,10 @@ local function highlights()
         BoomerWinbarTitle = 'Title',
         BoomerWinbarBusy = 'DiagnosticWarn',
         BoomerWinbarError = 'DiagnosticError',
+        BoomerDiffAdd = 'DiffAdd',
+        BoomerDiffDelete = 'DiffDelete',
+        BoomerDiffText = 'DiffText',
+        BoomerDiffHunk = 'DiffChange',
     }) do
         api.nvim_set_hl(0, group, { default = true, link = link })
     end
@@ -70,7 +76,8 @@ vim.treesitter.language.register('markdown', 'boomer')
 -- opts.labels: { user = 'Prompt:', agent = 'Agent:' }; the prompt is the user label
 -- followed by a space. opts.signs: { user = '▌', agent = '▌' }, signs shown in the
 -- gutter next to messages, or nil. opts.window: how open() shows the chat
--- (config `window`).
+-- (config `window`). opts.cwd: diff paths are shown relative to it.
+-- opts.diff_lines: lines of a tool call's diff shown (config `diff_lines`).
 ---@return boomer.View
 function View.new(opts)
     local buf = api.nvim_create_buf(false, true)
@@ -83,6 +90,8 @@ function View.new(opts)
             signs = opts.signs,
             prompt = prompt,
             window = opts.window,
+            cwd = opts.cwd,
+            diff_lines = opts.diff_lines or nil,
             marks = {},
             queued = {},
             -- prompt_setprompt() below, before the input mark exists, makes
@@ -360,6 +369,142 @@ function View:write(text, group)
             hl_group = group or 'BoomerSystem',
             priority = 150,
         })
+    end
+end
+
+local function continuation(byte)
+    return byte ~= nil and byte >= 0x80 and byte < 0xC0
+end
+
+-- Byte columns [first, a_end) of `a` and [first, b_end) of `b` that differ
+-- between their common prefix and suffix, on character boundaries.
+local function changed(a, b)
+    local n = math.min(#a, #b)
+    local first = 0
+    while first < n and a:byte(first + 1) == b:byte(first + 1) do
+        first = first + 1
+    end
+    while first > 0 and (continuation(a:byte(first + 1)) or continuation(b:byte(first + 1))) do
+        first = first - 1
+    end
+    local last = 0
+    while last < n - first and a:byte(#a - last) == b:byte(#b - last) do
+        last = last + 1
+    end
+    while
+        last > 0
+        and (continuation(a:byte(#a - last + 1)) or continuation(b:byte(#b - last + 1)))
+    do
+        last = last - 1
+    end
+    return first, #a - last, #b - last
+end
+
+local line_kinds = { ['@'] = 'hunk', ['+'] = 'add', ['-'] = 'delete', ['\\'] = 'note' }
+
+-- Lines of a diff block, { text, kind }: file headers and hunks, cut off
+-- after `limit` lines (nil for none).
+local function block_lines(self, diffs, limit)
+    local out = {}
+    local function header(prefix, p)
+        p = p and self.cwd and vim.fs.relpath(self.cwd, p) or p
+        out[#out + 1] = { prefix .. (p or '/dev/null'), 'header' }
+    end
+    for _, d in ipairs(diffs) do
+        header('--- ', d.from)
+        header('+++ ', d.to)
+        for line in d.text:gmatch('[^\n]*\n?') do
+            if line ~= '' then
+                line = line:gsub('\n$', '')
+                out[#out + 1] = { line, line_kinds[line:sub(1, 1)] or 'context' }
+            end
+        end
+    end
+    local hidden = limit and #out - limit or 0
+    if hidden > 0 then
+        out = vim.list_slice(out, 1, limit)
+        out[#out + 1] =
+            { ('... %d more %s'):format(hidden, hidden == 1 and 'line' or 'lines'), 'note' }
+    end
+    return out
+end
+
+local diff_groups = {
+    fence = 'BoomerSystem',
+    header = 'BoomerSystem',
+    note = 'BoomerSystem',
+    hunk = 'BoomerDiffHunk',
+    add = 'BoomerDiffAdd',
+    delete = 'BoomerDiffDelete',
+}
+
+-- Write file changes as a fenced Markdown `diff` block, highlighted like
+-- diff mode: added and deleted lines over the whole width, and the changed
+-- part of each deleted line followed by an added one. Ends the streamed
+-- message, if any.
+---@param diffs boomer.Diff[]
+function View:diff(diffs)
+    if not self:valid() then
+        return
+    end
+    local lines = block_lines(self, diffs, self.diff_lines)
+    -- The fence is longer than any run of backticks in the diff, which would
+    -- close it otherwise.
+    local ticks = 2
+    for _, l in ipairs(lines) do
+        for run in l[1]:gmatch('`+') do
+            ticks = math.max(ticks, #run)
+        end
+    end
+    local fence = ('`'):rep(ticks + 1)
+    table.insert(lines, 1, { fence .. 'diff', 'fence' })
+    lines[#lines + 1] = { fence, 'fence' }
+    self.current = nil
+    local gap = self:gap()
+    if gap ~= '' then
+        self:append(gap)
+    end
+    local texts = vim.tbl_map(function(l)
+        return l[1]
+    end, lines)
+    local row, col = self:append(table.concat(texts, '\n') .. '\n')
+    local function mark(i, start, stop, opts)
+        opts.end_row, opts.end_col = row + i - 1, (i == 1 and col or 0) + stop
+        api.nvim_buf_set_extmark(self.buf, ns, row + i - 1, (i == 1 and col or 0) + start, opts)
+    end
+    for i, l in ipairs(lines) do
+        local kind, group = l[2], diff_groups[l[2]]
+        if kind == 'add' or kind == 'delete' then
+            mark(i, 0, 0, { line_hl_group = group, priority = 150 })
+        elseif group then
+            mark(i, 0, #l[1], { hl_group = group, priority = 150 })
+        end
+    end
+    -- Pair each run of deleted lines with the run of added lines after it;
+    -- "\ No newline at end of file" notes may come between them.
+    local i = 1
+    while i <= #lines do
+        local dels, adds = {}, {}
+        while lines[i] and (lines[i][2] == 'delete' or #dels > 0 and lines[i][2] == 'note') do
+            dels[#dels + 1] = lines[i][2] == 'delete' and i or nil
+            i = i + 1
+        end
+        while #dels > 0 and lines[i] and lines[i][2] == 'add' do
+            adds[#adds + 1] = i
+            i = i + 1
+        end
+        for k = 1, math.min(#dels, #adds) do
+            local a, b = lines[dels[k]][1]:sub(2), lines[adds[k]][1]:sub(2)
+            local first, a_end, b_end = changed(a, b)
+            for _, m in ipairs({ { dels[k], a_end }, { adds[k], b_end } }) do
+                if m[2] > first then
+                    mark(m[1], first + 1, m[2] + 1, { hl_group = 'BoomerDiffText', priority = 200 })
+                end
+            end
+        end
+        if #dels == 0 then
+            i = i + 1
+        end
     end
 end
 
