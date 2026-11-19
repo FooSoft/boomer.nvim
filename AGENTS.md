@@ -1,4 +1,4 @@
-# Copilot instructions for boomer.nvim
+# Agent instructions for boomer.nvim
 
 Neovim 0.12+ plugin (pure Lua, no dependencies) that provides a chat buffer for
 coding agents: Codex via its App Server protocol, and GitHub Copilot CLI and
@@ -18,8 +18,7 @@ make test-real BACKEND=codex       # opt-in: initialize a real, authenticated CL
 make test-real BACKEND=copilot REAL_ARGS=--allow-inference   # sends a prompt; uses quota
 ```
 
-CI (`.github/workflows/test.yml`) runs `make test` on Linux and Windows with
-Neovim 0.12. Formatting follows `.stylua.toml` (StyLua, Lua 5.1 syntax,
+Formatting follows `.stylua.toml` (StyLua, Lua 5.1 syntax,
 4-space indent, 100 columns, single quotes, `collapse_simple_statement = "Never"`:
 keep guards and callbacks expanded across lines rather than one-liners).
 
