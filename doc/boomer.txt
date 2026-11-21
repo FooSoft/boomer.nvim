@@ -195,14 +195,16 @@ line is not shown. Plain |:Boomer| writes no result.
         `show`. Otherwise the command is not available.
 
 /resume [{id}]                                          *boomer-/resume*
-        Load a saved session for the working directory. Without a chat, this
+        Load a saved session for Neovim's current working directory, which
+        may differ from the one the agent started in. Without a chat, this
         starts the default agent first; then dismissing the picker, or
         having no saved sessions, starts a new session. Choosing the open
         session keeps it and writes `[Session: {title} (current)]`. Like
         `/new` and `/agent`, it carries the draft over to the new buffer.
 
 /new                                                    *boomer-/new*
-        Start a new session with the same agent.
+        Start a new session with the same agent, in Neovim's current working
+        directory.
 
 /agent [{name}]                                         *boomer-/agent*
         Stop the current agent and start {name} in the same windows. This
@@ -339,7 +341,10 @@ replaced (such as by `/new`), `send()` and `write()` do nothing. Example: >lua
 5. AGENTS                                                      *boomer-agents*
 
 An agent profile names a protocol and the process that speaks it. The agent
-runs in Neovim's working directory (|getcwd()|) when the chat starts.
+runs in Neovim's working directory (|getcwd()|) when the chat starts. Its
+sessions use the working directory Neovim has when |boomer-/new| or
+|boomer-/resume| runs: after |:cd|, the running agent lists and opens sessions
+for the new directory.
 Built-in profiles expect the executable on `$PATH`. The Codex profile: >lua
 
     codex = { protocol = 'codex', command = 'codex', args = {} },
@@ -445,7 +450,7 @@ without a chat:
   limits        `{ primary = l, secondary = l }` account rate limits (Codex,
                 ChatGPT login), each `{ used = percent, window = minutes,
                 resets = unix time }`: usually the 5-hour and weekly windows.
-  cwd           Working directory.
+  cwd           Working directory of the session.
   buf           Chat buffer.
 
 Fields are nil until the agent reports them.

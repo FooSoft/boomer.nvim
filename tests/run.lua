@@ -1530,6 +1530,92 @@ test('sessions', function()
     finish()
 end)
 
+test('sessions follow the working directory', function()
+    -- The agent keeps running where it started; /resume and /new use the
+    -- directory Neovim has now.
+    local dir = vim.fs.joinpath(cwd, 'boomer-cwd-test')
+    vim.fn.mkdir(dir, 'p')
+    vim.fn.chdir(dir)
+    local there = require('boomer.config').cwd()
+    vim.fn.chdir(cwd)
+    local function body()
+        local list = steps(load('acp-sessions'), 3)
+        local resumed = steps(load('acp-resume-replay'), 3, 5)
+        list[1].message.params.cwd = there
+        resumed[1].message.params.cwd = there
+        local scenario = {
+            version = 1,
+            profile = 'acp-v1',
+            steps = steps(load('acp-sessions'), 1, 2),
+        }
+        vim.list_extend(scenario.steps, steps(load('acp-basic'), 3, 4))
+        scenario.steps[4].message.result.sessionId = 's0'
+        vim.list_extend(scenario.steps, list)
+        vim.list_extend(scenario.steps, resumed)
+        local old = open(scenario, 'copilot')
+        ready(old)
+        assert(state(old).cwd == cwd, vim.inspect(state(old).cwd))
+        vim.fn.chdir(there)
+        local prompt
+        vim.ui.select = function(items, opts, cb)
+            prompt = opts.prompt
+            cb(items[2])
+        end
+        assert(boomer.resume())
+        await(function()
+            return not api.nvim_buf_is_valid(old)
+        end, 'old buffer wiped')
+        local buf = api.nvim_get_current_buf()
+        ready(buf)
+        assert(prompt == 'Boomer sessions (copilot | ' .. there .. '):', prompt)
+        assert(state(buf).session == 's1' and state(buf).cwd == there, vim.inspect(state(buf)))
+        finish()
+
+        -- /new on a running Codex agent starts the thread in the new directory.
+        vim.fn.chdir(cwd)
+        local basic = load('codex-basic')
+        local started = steps(load('codex-basic'), 6, 7)
+        started[1].message.params.cwd = there
+        started[2].message.result.cwd = there
+        scenario = { version = 1, profile = 'codex-v2', steps = steps(basic, 1, 7) }
+        vim.list_extend(scenario.steps, started)
+        old = open(scenario)
+        ready(old)
+        local rpc = last
+        vim.fn.chdir(there)
+        assert(boomer.new())
+        buf = api.nvim_get_current_buf()
+        assert(buf ~= old)
+        ready(buf)
+        assert(state(buf).cwd == there and last == rpc, vim.inspect(state(buf)))
+        finish()
+
+        -- /resume that starts the agent lists where it ran, even after a :cd
+        -- while the agent was starting.
+        vim.fn.chdir(cwd)
+        play({
+            version = 1,
+            profile = 'codex-v2',
+            steps = steps(load('codex-sessions'), 1, 7, basic, 6, 7),
+        })
+        vim.ui.select = function(_, _, cb)
+            cb(nil)
+        end
+        boomer.resume()
+        vim.fn.chdir(there)
+        buf = api.nvim_get_current_buf()
+        ready(buf)
+        assert(state(buf).cwd == cwd, vim.inspect(state(buf)))
+        finish()
+    end
+    local ok, err = pcall(body)
+    vim.fn.chdir(cwd)
+    vim.fn.delete(dir, 'd')
+    if not ok then
+        error(err, 0)
+    end
+end)
+
 local function expect(method, params, capture)
     return {
         op = 'expect_request',

@@ -10,7 +10,7 @@
 ---@field command string Executable.
 ---@field args string[]
 ---@field env? table<string, string> Added to Neovim's environment.
----@field cwd string Absolute working directory: Neovim's (set by resolve()).
+---@field cwd string Absolute working directory of the process: Neovim's (set by resolve()).
 ---@field label string Label of the agent's messages (set by resolve()).
 ---@field model? string Default model for new sessions (ID or name).
 ---@field effort? string Default reasoning effort for new sessions.
@@ -247,6 +247,17 @@ end
 
 -- A copy of the named profile (the default agent when nil), completed with
 -- its name, Neovim's working directory and a label.
+-- Neovim's working directory, absolute, as agents spell it.
+---@return string
+function M.cwd()
+    local cwd = vim.fs.normalize(vim.fn.getcwd())
+    if vim.fn.has('win32') == 1 then
+        -- Agents record and filter saved sessions by their own (native) cwd.
+        cwd = cwd:gsub('/', '\\')
+    end
+    return cwd
+end
+
 ---@param name? string
 ---@return boomer.Profile?, string? err
 function M.resolve(name)
@@ -258,11 +269,7 @@ function M.resolve(name)
     p = vim.deepcopy(p)
     p.name = name
     p.args, p.options = p.args or {}, p.options or {}
-    p.cwd = vim.fs.normalize(vim.fn.getcwd())
-    if vim.fn.has('win32') == 1 then
-        -- Agents record and filter saved sessions by their own (native) cwd.
-        p.cwd = p.cwd:gsub('/', '\\')
-    end
+    p.cwd = M.cwd()
     p.label = p.label or M.options.labels.agent
     return p
 end

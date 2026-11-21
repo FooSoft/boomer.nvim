@@ -106,7 +106,7 @@ Specifies the maximum number of lines of a [file change diff](#chat) shown in th
 
 ## Agents
 
-Each agent profile names a protocol and the process that speaks it. Built-in profiles expect their executable on `$PATH`, and the agent runs in Neovim's working directory. The `/agent` picker offers the installed ones; run `:checkhealth boomer` to check them.
+Each agent profile names a protocol and the process that speaks it. Built-in profiles expect their executable on `$PATH`, and the agent runs in Neovim's working directory when it starts; sessions use the directory Neovim has when `/new` or `/resume` runs, so after `:cd` the running agent lists and opens sessions there. The `/agent` picker offers the installed ones; run `:checkhealth boomer` to check them.
 
 | Profile    | Command                       | Agent                      |
 | -          | -                             | -                          |
@@ -160,11 +160,11 @@ Chooses what the agent may do without asking: Read Only, Default or Full Access 
 
 #### `/resume [id]`
 
-Loads a saved session for the working directory; when this starts the agent, dismissing the picker starts a new session. The draft is kept in the new chat buffer, as with `/new` and `/agent`.
+Loads a saved session for Neovim's current working directory; when this starts the agent, dismissing the picker starts a new session. The draft is kept in the new chat buffer, as with `/new` and `/agent`.
 
 #### `/new`
 
-Starts a new session with the same agent.
+Starts a new session with the same agent, in Neovim's current working directory.
 
 #### `/agent [name]`
 

@@ -54,6 +54,7 @@ local M = {}
 
 ---@class boomer.Chat
 ---@field opts boomer.Profile
+---@field cwd string Working directory of the current session (see config.cwd()).
 ---@field client? boomer.Client nil if the agent failed to start.
 ---@field view boomer.View Shows the current session.
 ---@field state boomer.Status
@@ -714,7 +715,7 @@ local function new_view(c, draft)
         signs = config.options.signs
             and { user = config.options.signs.prompt, agent = config.options.signs.agent },
         window = config.options.window,
-        cwd = c.opts.cwd,
+        cwd = c.cwd,
         diff_lines = config.options.diff_lines,
     })
     attach(c, c.view)
@@ -766,14 +767,17 @@ local function session_name(c)
     return one_line(title) or c.session
 end
 
--- Open a session (a new one when id is nil) in the chat's current view. Once
--- it is ready, a pending c.announce ('agent' or 'session', set by the command
--- that switched) is confirmed in the transcript.
-local function load(c, id)
+-- Open a session (a new one when id is nil) for working directory `cwd`
+-- (default: the chat's) in the chat's current view. Once it is ready, a
+-- pending c.announce ('agent' or 'session', set by the command that switched)
+-- is confirmed in the transcript.
+local function load(c, id, cwd)
     c.loading, c.session, c.agent_commands = true, nil, {}
     -- Pickers for the previous session are now stale.
     c.picks = (c.picks or 0) + 1
-    update(c, session_fields)
+    c.cwd = cwd or c.cwd
+    c.view.cwd = c.cwd
+    update(c, vim.tbl_extend('force', session_fields, { cwd = c.cwd }))
     status(c, id and 'loading' or 'starting')
     local function done(err)
         if c.dead or c.closed then
@@ -797,21 +801,22 @@ local function load(c, id)
         drain(c)
     end
     if id then
-        c.client:load_session(id, c.opts.cwd, done)
+        c.client:load_session(id, c.cwd, done)
     else
-        c.client:new_session(c.opts.cwd, done)
+        c.client:new_session(c.cwd, done)
     end
 end
 
 -- Swap a fresh buffer, with the draft, into the chat's windows and wipe the
--- old one. The client stays; only its current session changes.
-local function switch(c, id)
+-- old one. The client stays; only its current session changes, to session
+-- `id` (a new one when nil) for working directory `cwd`.
+local function switch(c, id, cwd)
     local old = c.view
     new_view(c, old:draft())
     place(c, vim.fn.win_findbuf(old.buf))
     vim.api.nvim_buf_delete(old.buf, { force = true })
     c.announce = 'session'
-    load(c, id)
+    load(c, id, cwd)
 end
 
 -- Focus the chat and confirm that what a command selects, `what`, is already
@@ -822,26 +827,30 @@ local function already(c, line, what)
     c.view:write('[' .. what .. ' (current)]')
 end
 
--- Pick a saved session. fresh: the chat has no session yet, so dismissing the
--- picker starts a new one. A picker that closes silently leaves it without
--- one; /new and /resume still work.
+-- Pick a saved session for Neovim's current working directory. fresh: the
+-- chat has no session yet, so dismissing the picker starts a new one. A
+-- picker that closes silently leaves it without one; /new and /resume still
+-- work.
 local function choose(c, fresh)
+    -- Read once: listing and loading agree even after a :cd meanwhile. A fresh
+    -- chat uses the directory its command ran in, before the agent started.
+    local cwd = fresh and c.cwd or config.cwd()
     local function dismiss(msg)
         if msg then
             warn(msg, c)
         end
         if fresh then
-            load(c)
+            load(c, nil, cwd)
         end
     end
     local view = c.view
-    c.client:list_sessions(c.opts.cwd, function(err, items)
+    c.client:list_sessions(cwd, function(err, items)
         if c.dead or c.closed or c.view ~= view then
             return
         elseif err then
             return dismiss(err.message)
         elseif #items == 0 then
-            return dismiss('No saved sessions for ' .. c.opts.cwd)
+            return dismiss('No saved sessions for ' .. cwd)
         end
         c.sessions = items
         if fresh then
@@ -850,7 +859,7 @@ local function choose(c, fresh)
             restore(c)
         end
         pick(c, items, {
-            prompt = 'Boomer sessions (' .. c.opts.name .. ' | ' .. c.opts.cwd .. '):',
+            prompt = 'Boomer sessions (' .. c.opts.name .. ' | ' .. cwd .. '):',
             format_item = function(item)
                 return (one_line(item.title) or item.id)
                     .. (item.updated and (' | ' .. item.updated) or '')
@@ -860,11 +869,11 @@ local function choose(c, fresh)
             if not item then
                 return dismiss(e)
             elseif fresh then
-                load(c, item.id)
+                load(c, item.id, cwd)
             elseif item.id == c.session then
                 already(c, '/resume ' .. item.id, 'Session: ' .. session_name(c))
             elseif check(c, 'switch') then
-                switch(c, item.id)
+                switch(c, item.id, cwd)
             end
         end)
     end)
@@ -881,6 +890,7 @@ local function start(o)
     ---@type boomer.Chat
     local c = {
         opts = profile,
+        cwd = profile.cwd,
         queue = {},
         prompts = {},
         loading = true,
@@ -1139,7 +1149,7 @@ function M.resume(id)
     elseif id == c.session then
         already(c, '/resume ' .. id, 'Session: ' .. session_name(c))
     else
-        switch(c, id)
+        switch(c, id, config.cwd())
     end
     return true
 end
@@ -1152,7 +1162,7 @@ function M.new()
     elseif not c or c.dead then
         restart(c, { agent = c and c.opts.name, announce = 'session' })
     else
-        switch(c)
+        switch(c, nil, config.cwd())
     end
     return true
 end
