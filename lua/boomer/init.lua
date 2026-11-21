@@ -76,6 +76,7 @@ local M = {}
 ---@class boomer.Queued
 ---@field text string Sent to the agent.
 ---@field line string As typed: shown when sent, or put back into the draft.
+---@field draft? string Put back into the draft instead of `line`.
 
 ---@type boomer.Chat?
 local chat
@@ -166,7 +167,7 @@ local function restore(c)
         return
     end
     local parts = vim.tbl_map(function(e)
-        return e.line
+        return e.draft or e.line
     end, c.prompts)
     c.prompts = {}
     sync_queue(c)
@@ -498,11 +499,13 @@ end
 -- (callers check the `queue` gate). `line` is shown as the user's message.
 -- `now` puts it at the front of the queue and interrupts the running turn,
 -- so it is sent once the agent has stopped; the rest of the queue follows.
-local function submit(c, text, line, now)
+-- `draft` replaces `line` if the prompt returns to the draft.
+local function submit(c, text, line, now, draft)
     if not occupied(c) then
         return send(c, text, line)
     end
-    table.insert(c.prompts, now and 1 or #c.prompts + 1, { text = text, line = line })
+    local e = { text = text, line = line, draft = draft }
+    table.insert(c.prompts, now and 1 or #c.prompts + 1, e)
     sync_queue(c)
     if now and c.busy then
         interrupt(c)
@@ -1288,16 +1291,90 @@ function M.close()
     return true
 end
 
--- Run a command line such as "model gpt-5" or "/usage", as typed after
--- :Boomer. An empty line opens the chat.
+-- Lines line1..line2 of `buf` (unsaved edits included) as a fenced code block
+-- headed by their location, relative to `cwd` when inside it; also returns
+-- the location.
+local function snippet(buf, line1, line2, cwd)
+    local name = vim.api.nvim_buf_get_name(buf)
+    local path = name == '' and '[No Name]' or vim.fs.relpath(cwd, name) or name
+    local ref = path .. ':' .. line1 .. (line2 ~= line1 and ('-' .. line2) or '')
+    local lines = vim.api.nvim_buf_get_lines(buf, line1 - 1, line2, false)
+    local fence = '```'
+    for _, l in ipairs(lines) do
+        for run in l:gmatch('`+') do
+            if #run >= #fence then
+                fence = ('`'):rep(#run + 1)
+            end
+        end
+    end
+    local block = { ref, fence .. vim.bo[buf].filetype }
+    vim.list_extend(block, lines)
+    block[#block + 1] = fence
+    return table.concat(block, '\n'), ref
+end
+
+-- The chat, started (or restarted) if needed and shown without leaving the
+-- current window; nil if it could not start.
+local function reveal()
+    local win = vim.api.nvim_get_current_win()
+    if chat and chat.dead then
+        restart(chat, { agent = chat.opts.name })
+    elseif not chat then
+        start({})
+    end
+    if not chat then
+        return nil
+    end
+    chat.view:open(true)
+    if vim.api.nvim_win_is_valid(win) then
+        vim.api.nvim_set_current_win(win)
+    end
+    return chat
+end
+
+-- Run a line typed after :Boomer as if submitted in the chat: `/name args`
+-- runs a command, `//text` sends `/text`, other text is sent as a prompt,
+-- starting the chat if needed. The current window stays current. An empty
+-- line opens the chat. `range` adds lines of a buffer: to the prompt, or to
+-- the draft without text. A line that cannot run now only warns.
 ---@param line? string
-function M.run(line)
+---@param range? { buf: integer, line1: integer, line2: integer }
+function M.run(line, range)
     line = vim.trim(line or '')
-    if line == '' then
+    local cmd = commands.parse(line)
+    if range and cmd and cmd.name then
+        return warn('A range takes a prompt, not a command', chat)
+    elseif range and vim.bo[range.buf].filetype == 'boomer' then
+        return warn('Select lines in another buffer', chat)
+    elseif cmd and cmd.name then
+        return run_command(chat, cmd.name, cmd.args)
+    elseif line == '' and not range then
         return M.open() and true
     end
-    local name, args = line:match('^/?(%S+)%s*(.-)%s*$')
-    return run_command(chat, name, args)
+    local c = reveal()
+    if not c then
+        return
+    end
+    local block, ref
+    if range then
+        block, ref = snippet(range.buf, range.line1, range.line2, c.cwd)
+    end
+    if line == '' then
+        local draft = c.view:draft()
+        c.view:set_draft(draft:find('%S') and (draft .. '\n\n' .. block) or block)
+        return M.open() and true
+    end
+    local text = cmd and cmd.text or line
+    if not can_send(c, text) then
+        return
+    end
+    if not block then
+        submit(c, text, line)
+    else
+        local typed = line .. '\n\n' .. block
+        submit(c, text .. '\n\n' .. block, line .. ' [' .. ref .. ']', nil, typed)
+    end
+    return true
 end
 
 -- A copy of the chat status, with the chat buffer (nil without a chat).
@@ -1400,19 +1477,20 @@ local function prefixed(list, lead)
     end, list)
 end
 
--- :Boomer completion: subcommands, then their arguments. A subcommand may
--- start with '/', as in the prompt.
+-- :Boomer completion: `/command` names, then their arguments. Prompt text
+-- completes nothing.
 function M.complete(lead, cmdline, pos)
     local before = cmdline:sub(1, pos):gsub('^%s*%S+%s*', '', 1)
-    local name = before:match('^/?(%S+)%s')
-    if not name then
-        local slash = lead:sub(1, 1) == '/' and '/' or ''
-        local names = vim.tbl_map(function(item)
-            return slash .. item.name
-        end, commands.list(config.options.commands, chat and chat.agent_commands or {}))
-        return prefixed(names, lead)
+    local name = before:match('^/(%S+)%s')
+    if name then
+        return prefixed(arg_candidates(name), lead)
+    elseif before ~= '' and not before:match('^/%S*$') then
+        return {}
     end
-    return prefixed(arg_candidates(name), lead)
+    local names = vim.tbl_map(function(item)
+        return '/' .. item.name
+    end, commands.list(config.options.commands, chat and chat.agent_commands or {}))
+    return prefixed(names, lead)
 end
 
 -- 'omnifunc' for the chat buffer: a command name at the start of the draft,

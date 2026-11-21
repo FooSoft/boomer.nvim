@@ -634,9 +634,12 @@ local function open_win(buf, w)
 end
 
 -- Focus a window showing the chat, or open one as configured by
--- window = { position, width, height, float } (see boomer-config).
-function View:open()
-    local win = vim.fn.win_findbuf(self.buf)[1]
+-- window = { position, width, height, float } (see boomer-config). `here`:
+-- only reuse a window in the current tab page.
+function View:open(here)
+    local win = vim.iter(vim.fn.win_findbuf(self.buf)):find(function(w)
+        return not here or api.nvim_win_get_tabpage(w) == api.nvim_get_current_tabpage()
+    end)
     if win then
         api.nvim_set_current_win(win)
     else

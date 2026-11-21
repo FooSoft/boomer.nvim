@@ -9,6 +9,7 @@ Boomer requires Neovim 0.12 or newer and an installed, authenticated agent. It h
 Features include:
 
 *   Chatting with Codex or any ACP agent in a split or floating window.
+*   Asking about selected lines, unsaved changes included, from any buffer.
 *   Queuing prompts and setting changes while a turn is running.
 *   Changing the model, reasoning effort, mode and permissions from the chat.
 *   Resuming saved sessions and switching agents in the same window.
@@ -130,17 +131,26 @@ Commands are not mapped by default; an example set of bindings is shown below:
 
 ```lua
 vim.keymap.set('n', '<Leader>aa', '<Cmd>Boomer<CR>')
-vim.keymap.set('n', '<Leader>am', '<Cmd>Boomer model<CR>')
-vim.keymap.set('n', '<Leader>ac', '<Cmd>Boomer cancel<CR>')
+vim.keymap.set('n', '<Leader>am', '<Cmd>Boomer /model<CR>')
+vim.keymap.set('n', '<Leader>ac', '<Cmd>Boomer /cancel<CR>')
+vim.keymap.set('x', '<Leader>a', ':Boomer<CR>')
 ```
 
-Each command below can be run as `:Boomer {command}` with command-line completion, or typed in the prompt as `/command` with <kbd>Ctrl-X</kbd> <kbd>Ctrl-O</kbd> or <kbd>Ctrl-N</kbd> completion; start the draft with `//` to send a literal `/text`. Commands that take an argument open a picker without one, and commands without an argument refuse one. A command that runs is echoed into the chat as typed, such as `/model gpt-5`, followed by its result, such as `[Setting: model = GPT-5]`; `/new`, `/resume` and `/agent` announce theirs in the new chat buffer, such as `[Session: new]` or `[Agent: copilot]`.
+Each command below can be run as `:Boomer /{command}` with command-line completion, or typed in the prompt as `/command` with <kbd>Ctrl-X</kbd> <kbd>Ctrl-O</kbd> or <kbd>Ctrl-N</kbd> completion; start the draft with `//` to send a literal `/text`. Commands that take an argument open a picker without one, and commands without an argument refuse one. A command that runs is echoed into the chat as typed, such as `/model gpt-5`, followed by its result, such as `[Setting: model = GPT-5]`; `/new`, `/resume` and `/agent` announce theirs in the new chat buffer, such as `[Session: new]` or `[Agent: copilot]`.
 
 Slash commands advertised by ACP agents (such as Copilot's `/plan`) are sent to the agent; unknown ones are not sent.
 
 #### `Boomer`
 
 Opens or focuses the chat, starting the default agent. If the agent has exited, restarts it in the same window, keeping the draft.
+
+#### `Boomer {text}`
+
+Submits `{text}` as if typed in the prompt: `:Boomer why does this leak?` sends a prompt (queued during a turn), starting the agent if needed, and `:Boomer /model` runs a command, here opening the model picker. Commands need a chat, except `/new`, `/resume` and `/agent`. A prompt shows the chat in the current tab page, but the current window stays current. A line that cannot run now only warns. A prompt with a range that returns to the draft (such as on <kbd>Ctrl-C</kbd>) brings its code block along.
+
+#### `[range]Boomer [text]`
+
+Adds lines of the current buffer, as Neovim has them (unsaved changes included), as a fenced code block headed by their location, such as `lua/boomer/rpc.lua:40-58`. With text, sends the text followed by the block; the chat shows only `why? [lua/boomer/rpc.lua:40-58]`. Without text, appends the block to the draft and focuses the chat. In Visual mode, `:` inserts the selection's range, so `vaf:Boomer why?` asks about the function at the cursor (with a treesitter text object), and `xnoremap <Leader>a :Boomer<CR>` adds the selection to the draft.
 
 #### `/model [id]`
 

@@ -26,8 +26,10 @@ keep guards and callbacks expanded across lines rather than one-liners).
 
 - `plugin/boomer.lua` defines only `:Boomer`; everything else is lazily required.
 - `lua/boomer/init.lua` owns the single global chat (`boomer.Chat`): the
-  client, its session, the view, the permission queue and the prompt queue. All
-  `:Boomer` subcommands and `/slash` commands dispatch here. The **adapter
+  client, its session, the view, the permission queue and the prompt queue.
+  `:[range]Boomer {line}` is handled like a submitted draft (`M.run`: a prompt,
+  with the range's lines appended, or a `/command`); all commands dispatch
+  here. The **adapter
   interface** (`boomer.Client`) and the **callbacks** adapters report through
   (`boomer.Callbacks`) are documented as LuaCATS classes at the top of this file.
 - Adapters `lua/boomer/codex.lua` and `lua/boomer/acp.lua` implement

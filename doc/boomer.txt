@@ -67,9 +67,9 @@ prompt. A failed turn, an agent exit or a session that fails to
 load also returns them to the draft.
 
 - One chat per Neovim instance. Hiding the window keeps it; |:bdelete| or
-  `:Boomer close` ends it. History is read-only; only the draft is sent.
+  `:Boomer /close` ends it. History is read-only; only the draft is sent.
 - Turns have no timeout. A cancel waits for the agent to stop the turn; if
-  the agent hangs, use `:Boomer close`.
+  the agent hangs, use `:Boomer /close`.
 - Switching sessions (`/new`, `/resume`) reuses the agent process and opens
   the session in a fresh buffer; the previous buffer is wiped. Loaded history
   shows user and assistant messages only.
@@ -108,10 +108,41 @@ load also returns them to the draft.
                                                         *:Boomer*
 :Boomer                 Open or focus the chat, starting the default agent.
 
-:Boomer {command} [{args}]
-                        Run {command}, one of the commands below. Commands
-                        and their arguments complete with
-                        |cmdline-completion|.
+:Boomer {text}          Submit {text} as if typed in the prompt and sent
+                        with <CR>: a prompt is sent (queued during a turn,
+                        |boomer-queue|), starting the default agent if there
+                        is no chat; `//text` sends `/text`. The chat is shown
+                        in the current tab page, but the current window stays
+                        current, so you keep editing while the reply streams.
+                        A line that cannot be sent or run now only warns.
+
+:Boomer /{command} [{args}]
+                        Run {command}, one of the commands below, such as
+                        `:Boomer /model`, which opens the model picker.
+                        Commands need a chat (`/new`, `/resume` and `/agent`
+                        start one). Commands and their arguments complete
+                        with |cmdline-completion|; prompt text does not.
+
+                                                        *boomer-selection*
+:[range]Boomer [{text}] Add lines [range] of the current buffer, as Neovim
+                        has them (unsaved changes included), as a fenced
+                        code block headed by their location, such as
+                        `lua/boomer/rpc.lua:40-58` (relative to the chat's
+                        directory when inside it). With {text}, send {text}
+                        followed by the block; the transcript shows only
+                        `{text} [lua/boomer/rpc.lua:40-58]`; if it returns to
+                        the draft (|boomer-queue|), the block comes along.
+                        Without {text},
+                        append the block to the draft and focus the chat, to
+                        write the question there. A range cannot be given to
+                        a /command. In Visual mode, `:` inserts the range of
+                        the selection, so `vaf:Boomer why?` asks about the
+                        function at the cursor (with a treesitter text
+                        object). Mappings: >vim
+
+    xnoremap <Leader>a :Boomer<CR>
+    xnoremap <Leader>e :Boomer explain this<CR>
+<
 
                                                         *boomer-slash*
 The same commands can be typed in the prompt as `/command [args]`. Boomer
@@ -366,7 +397,7 @@ The ACP profiles (`protocol = 'acp'`):
   vibe          `vibe-acp`                    Mistral Vibe
 
 The `/agent` picker and completion list the profiles whose executable is
-installed, plus the default and current ones; `:Boomer agent {name}` accepts
+installed, plus the default and current ones; `:Boomer /agent {name}` accepts
 any profile.
 
 Fields given in `setup({ agents = ... })` replace the built-in fields of the
@@ -506,8 +537,9 @@ Boomer defines no global mappings. In the chat buffer:
 Map |:Boomer| commands with |<Cmd>|: >lua
 
     vim.keymap.set('n', '<Leader>aa', '<Cmd>Boomer<CR>')
-    vim.keymap.set('n', '<Leader>am', '<Cmd>Boomer model<CR>')
-    vim.keymap.set('n', '<Leader>ac', '<Cmd>Boomer cancel<CR>')
+    vim.keymap.set('n', '<Leader>am', '<Cmd>Boomer /model<CR>')
+    vim.keymap.set('n', '<Leader>ac', '<Cmd>Boomer /cancel<CR>')
+    vim.keymap.set('x', '<Leader>a', ':Boomer<CR>')
 <
 ==============================================================================
 9. HIGHLIGHTS                                              *boomer-highlights*
@@ -555,7 +587,8 @@ the command started, or nil after a warning.
 
   setup({opts})         See |boomer.setup()|.
   open()                Open or focus the chat; returns its buffer.
-  run({line})           Run a |:Boomer| command line, such as `'model gpt-5'`.
+  run({line})           Run a |:Boomer| line, such as `'/model gpt-5'` or a
+                        prompt.
   model([{value}]), effort([{value}]), mode([{value}]),
   permissions([{preset}]), resume([{id}]), new(), agent([{name}]),
   compact([{focus}]), usage(), help(), cancel(), close()

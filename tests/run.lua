@@ -1816,22 +1816,22 @@ test('codex slash commands', function()
     enter(buf)
     assert(draft(buf) == '/new foo' and warned(buf, '/new takes no arguments'), text(buf))
     type_draft(buf, '')
-    vim.cmd('Boomer usage x')
+    vim.cmd('Boomer /usage x')
     assert(warned(buf, '/usage takes no arguments') and count(buf, 'Usage |') == 1, text(buf))
 
     -- Ex commands share the table and echo what they send.
-    vim.cmd('Boomer model m1')
+    vim.cmd('Boomer /model m1')
     await(function()
         return state(buf).model == 'm1'
     end, 'ex model')
-    vim.cmd('Boomer model m2')
-    assert(vim.tbl_contains(vim.fn.getcompletion('Boomer ', 'cmdline'), 'cancel'))
-    assert(vim.deep_equal(vim.fn.getcompletion('Boomer mod', 'cmdline'), { 'mode', 'model' }))
-    assert(vim.deep_equal(vim.fn.getcompletion('Boomer model ', 'cmdline'), { 'm1', 'm2' }))
+    vim.cmd('Boomer /model m2')
+    assert(vim.tbl_contains(vim.fn.getcompletion('Boomer ', 'cmdline'), '/cancel'))
+    assert(vim.deep_equal(vim.fn.getcompletion('Boomer /mod', 'cmdline'), { '/mode', '/model' }))
+    assert(vim.deep_equal(vim.fn.getcompletion('Boomer /model ', 'cmdline'), { 'm1', 'm2' }))
     assert(
-        vim.deep_equal(vim.fn.getcompletion('Boomer agent c', 'cmdline'), { 'codex', 'copilot' })
+        vim.deep_equal(vim.fn.getcompletion('Boomer /agent c', 'cmdline'), { 'codex', 'copilot' })
     )
-    assert(vim.deep_equal(vim.fn.getcompletion('Boomer review ', 'cmdline'), {}))
+    assert(vim.deep_equal(vim.fn.getcompletion('Boomer /review ', 'cmdline'), {}))
 
     send(buf, '/resume s9')
     await(function()
@@ -1863,7 +1863,7 @@ test('codex permissions', function()
     assert(winbar(buf) == 'codex | Custom', winbar(buf))
     send(buf)
     turn(buf)
-    local values = vim.fn.getcompletion('Boomer permissions ', 'cmdline')
+    local values = vim.fn.getcompletion('Boomer /permissions ', 'cmdline')
     assert(vim.deep_equal(values, { 'read-only', 'auto', 'full-access' }), vim.inspect(values))
 
     send(buf, '/permissions read-only')
@@ -1921,7 +1921,7 @@ test('codex modes', function()
     local buf = open(scenario)
     ready(buf)
     assert(state(buf).mode == nil, vim.inspect(state(buf).mode))
-    assert(vim.deep_equal(vim.fn.getcompletion('Boomer mode ', 'cmdline'), { 'default', 'plan' }))
+    assert(vim.deep_equal(vim.fn.getcompletion('Boomer /mode ', 'cmdline'), { 'default', 'plan' }))
 
     send(buf, '/mode plan')
     await(function()
@@ -2123,12 +2123,12 @@ test('acp slash commands and defaults', function()
     send(buf, '/compact keep tests')
     turn(buf, 2)
     -- /permissions shows, completes and picks the agent's hint choices.
-    local values = vim.fn.getcompletion('Boomer permissions ', 'cmdline')
+    local values = vim.fn.getcompletion('Boomer /permissions ', 'cmdline')
     assert(
         vim.deep_equal(values, { 'default', 'assisted', 'allow-all', 'show' }),
         vim.inspect(values)
     )
-    values = vim.fn.getcompletion('Boomer autopilot ', 'cmdline')
+    values = vim.fn.getcompletion('Boomer /autopilot ', 'cmdline')
     assert(vim.deep_equal(values, { 'on', 'off' }), vim.inspect(values))
     type_draft(buf, '/permissions al')
     api.nvim_set_current_win(vim.fn.win_findbuf(buf)[1])
@@ -2988,7 +2988,7 @@ test('acp protocol edges', function()
     send(buf, '/usage')
     assert(has(buf, 'Context: 300 of 1.0k tokens (30%)'), text(buf))
     -- Agent commands run from Ex are echoed as the user's message.
-    vim.cmd('Boomer plan go')
+    vim.cmd('Boomer /plan go')
     await(function()
         return has(buf, '[max_tokens]') and status(buf, 'ready')
     end, 'agent command')
@@ -3310,13 +3310,13 @@ test('completion', function()
     vim.schedule(poll)
     keys('A<C-x><C-o>', '!')
     assert(vim.deep_equal(shown, { 'm1', 'm2' }), vim.inspect(shown))
-    assert(vim.deep_equal(vim.fn.getcompletion('Boomer effort ', 'cmdline'), { 'high' }))
-    -- :Boomer takes commands with their slash too.
-    assert(vim.deep_equal(vim.fn.getcompletion('Boomer /model ', 'cmdline'), { 'm1', 'm2' }))
-    assert(vim.deep_equal(vim.fn.getcompletion('Boomer /mod', 'cmdline'), { '/mode', '/model' }))
+    assert(vim.deep_equal(vim.fn.getcompletion('Boomer /effort ', 'cmdline'), { 'high' }))
+    -- Prompt text completes nothing.
+    assert(vim.deep_equal(vim.fn.getcompletion('Boomer mod', 'cmdline'), {}))
+    assert(vim.deep_equal(vim.fn.getcompletion('Boomer why /mod', 'cmdline'), {}))
     type_draft(buf, '')
     -- Sessions are picked, not completed.
-    assert(vim.deep_equal(vim.fn.getcompletion('Boomer resume ', 'cmdline'), {}))
+    assert(vim.deep_equal(vim.fn.getcompletion('Boomer /resume ', 'cmdline'), {}))
     finish()
 
     -- ACP agents without config options may report legacy session models.
@@ -3341,7 +3341,7 @@ test('completion', function()
     buf = open(scenario, 'copilot')
     ready(buf)
     assert(state(buf).model == 'Alpha', state(buf).model)
-    assert(vim.deep_equal(vim.fn.getcompletion('Boomer model ', 'cmdline'), { 'a', 'b' }))
+    assert(vim.deep_equal(vim.fn.getcompletion('Boomer /model ', 'cmdline'), { 'a', 'b' }))
     send(buf, '/model Beta')
     await(function()
         return state(buf).model == 'Beta'
@@ -3388,20 +3388,20 @@ test('user commands and chat edges', function()
     })
     ready(buf)
     local notified = #notices
-    assert(not boomer.run('bad') and warned(buf, '/bad: oops'), text(buf))
-    assert(not boomer.run('empty') and warned(buf, '/empty produced an empty prompt'))
-    assert(not boomer.run('nope') and warned(buf, 'Unknown command /nope'))
+    assert(not boomer.run('/bad') and warned(buf, '/bad: oops'), text(buf))
+    assert(not boomer.run('/empty') and warned(buf, '/empty produced an empty prompt'))
+    assert(not boomer.run('/nope') and warned(buf, 'Unknown command /nope'))
     assert(#notices == notified, 'notified while the chat is shown: ' .. notices[#notices])
     -- A hidden chat is notified too.
     vim.cmd('close')
-    assert(not boomer.run('bad') and count(buf, 'Warning: /bad: oops') == 2, text(buf))
+    assert(not boomer.run('/bad') and count(buf, 'Warning: /bad: oops') == 2, text(buf))
     assert(notices[#notices] == '/bad: oops', notices[#notices])
     boomer.open()
-    local files = vim.fn.getcompletion('Boomer files ', 'cmdline')
+    local files = vim.fn.getcompletion('Boomer /files ', 'cmdline')
     assert(vim.deep_equal(files, { 'codex.lua', 'b.lua' }), vim.inspect(files))
-    assert(vim.deep_equal(vim.fn.getcompletion('Boomer fixed t', 'cmdline'), { 'two' }))
+    assert(vim.deep_equal(vim.fn.getcompletion('Boomer /fixed t', 'cmdline'), { 'two' }))
 
-    assert(boomer.run('go x'), text(buf))
+    assert(boomer.run('/go x'), text(buf))
     turn(buf)
     assert(has(buf, 'Prompt: /go x\n\nPrompt: sent x'), text(buf))
     -- The omnifunc only completes on the prompt line.
@@ -3418,6 +3418,97 @@ test('user commands and chat edges', function()
     pause(30)
     assert(not has(fresh, 'LATE'), text(fresh))
     finish()
+end)
+
+test(':Boomer prompts and ranges', function()
+    local base = load('codex-basic')
+    local scenario = {
+        version = 1,
+        profile = 'codex-v2',
+        steps = steps(base, 1, 11, base, 8, 11, base, 8, 11, base, 8, 11),
+    }
+    scenario.steps[12].message.params.input[1].text = '/x'
+    scenario.steps[20].message.params.input[1].text = 'tab'
+    scenario.steps[16].message.params.input[1].text = 'why\n\nboomer-range.lua:2-3\n'
+        .. '````lua\nlocal function f()\n  return "``` x"\n````'
+    play(scenario)
+    -- An unsaved buffer: its lines are sent as they are in Neovim.
+    vim.cmd.edit(vim.fn.fnameescape(cwd .. '/boomer-range.lua'))
+    local code, file = api.nvim_get_current_win(), api.nvim_get_current_buf()
+    api.nvim_buf_set_lines(
+        file,
+        0,
+        -1,
+        false,
+        { 'local a = 1', 'local function f()', '  return "``` x"', 'end' }
+    )
+
+    -- Without a chat, a prompt starts one and is sent; focus stays.
+    assert(boomer.run('hello'))
+    local buf = boomer.status().buf
+    assert(api.nvim_get_current_win() == code and #vim.fn.win_findbuf(buf) == 1)
+    -- A queued range returns to the draft with its code.
+    vim.cmd('1Boomer early')
+    vim.cmd('Boomer /cancel')
+    local back = 'hello\n\nearly\n\nboomer-range.lua:1\n```lua\nlocal a = 1\n```'
+    assert(draft(buf) == back, draft(buf))
+    type_draft(buf, '')
+    vim.cmd('Boomer hello')
+    turn(buf)
+    assert(has(buf, 'Prompt: hello'), text(buf))
+    vim.cmd('Boomer //x')
+    turn(buf, 2)
+    assert(has(buf, 'Prompt: //x') and api.nvim_get_current_win() == code, text(buf))
+
+    -- A range goes with the prompt; the transcript names it.
+    vim.cmd('2,3Boomer why')
+    assert(api.nvim_get_current_win() == code)
+    turn(buf, 3)
+    assert(has(buf, 'Prompt: why [boomer-range.lua:2-3]\n'), text(buf))
+    assert(not has(buf, 'local function f'), 'the transcript shows the code')
+
+    -- A line that cannot run only warns.
+    type_draft(buf, 'keep')
+    vim.cmd('Boomer /new foo')
+    vim.cmd('2Boomer /model')
+    assert(warned(buf, '/new takes no arguments'), text(buf))
+    assert(warned(buf, 'A range takes a prompt, not a command'), text(buf))
+    assert(draft(buf) == 'keep' and api.nvim_get_current_win() == code, draft(buf))
+
+    -- A range without text goes into the draft, and the chat is focused.
+    vim.cmd('1Boomer')
+    assert(api.nvim_get_current_buf() == buf)
+    assert(draft(buf) == 'keep\n\nboomer-range.lua:1\n```lua\nlocal a = 1\n```', draft(buf))
+    vim.cmd('1Boomer x')
+    assert(warned(buf, 'Select lines in another buffer'), text(buf))
+    type_draft(buf, '')
+
+    -- A prompt from another tab page shows the chat there too.
+    vim.cmd('tabnew')
+    local other = api.nvim_get_current_win()
+    vim.cmd('Boomer tab')
+    assert(api.nvim_get_current_win() == other)
+    assert(#vim.fn.win_findbuf(buf) == 2 and vim.fn.tabpagebuflist()[2] == buf)
+    turn(buf, 4)
+    vim.cmd('tabclose')
+
+    -- A command's picker opens from another window and leaves it current.
+    api.nvim_set_current_win(code)
+    local offered
+    vim.ui.select = function(items, _, cb)
+        offered = vim.tbl_map(function(item)
+            return item.value
+        end, items)
+        cb(items[2], 2)
+    end
+    vim.cmd('Boomer /model')
+    await(function()
+        return state(buf).model == 'm2'
+    end, 'model picked')
+    assert(vim.deep_equal(offered, { 'm1', 'm2' }), vim.inspect(offered))
+    assert(api.nvim_get_current_win() == code and api.nvim_get_mode().mode == 'n')
+    finish()
+    vim.cmd('silent! bwipeout! ' .. file)
 end)
 
 test('VimLeavePre does not wait', function()
