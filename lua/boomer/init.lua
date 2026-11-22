@@ -650,6 +650,25 @@ local function attach(c, view)
         view:set_draft('')
         enter(c, view, text)
     end, { buffer = buf, desc = 'Submit Boomer prompt' })
+    -- i_CTRL-R puts a linewise register above the cursor line, ahead of the
+    -- text typed: insert its lines at the cursor instead, as if typed.
+    vim.keymap.set('i', '<C-R>', function()
+        local ok, reg = pcall(vim.fn.getcharstr)
+        local literal = ok and reg:match('^[\15\16\18]$') and reg or ''
+        if literal ~= '' then
+            ok, reg = pcall(vim.fn.getcharstr)
+        end
+        if not ok then
+            return
+        end
+        if reg:match('^[%w"*+]$') and vim.fn.getregtype(reg) == 'V' then
+            local lines = vim.fn.getreg(reg, 1, true)
+            lines[#lines + 1] = ''
+            vim.api.nvim_put(lines, 'c', false, true)
+        else
+            vim.api.nvim_feedkeys(vim.keycode('<C-R>') .. literal .. reg, 'ni', false)
+        end
+    end, { buffer = buf, desc = 'Insert register at the cursor' })
     -- Keys such as <C-j> and <kEnter> commit the draft without the mapping.
     vim.fn.prompt_setcallback(buf, function(text)
         view:uncommit(text)

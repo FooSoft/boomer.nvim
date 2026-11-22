@@ -68,6 +68,10 @@ load also returns them to the draft.
 
 - One chat per Neovim instance. Hiding the window keeps it; |:bdelete| or
   `:Boomer /close` ends it. History is read-only; only the draft is sent.
+  |i_CTRL-R| inserts a linewise register (such as `+` holding text that ends
+  with a newline) at the cursor, as if typed, rather than above the line.
+  Lines put above the prompt in Normal mode, such as with |P|, go into the
+  start of the draft.
 - Turns have no timeout. A cancel waits for the agent to stop the turn; if
   the agent hangs, use `:Boomer /close`.
 - Switching sessions (`/new`, `/resume`) reuses the agent process and opens

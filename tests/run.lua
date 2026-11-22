@@ -561,6 +561,93 @@ test('view rendering', function()
     api.nvim_buf_delete(view.buf, { force = true })
 end)
 
+test('lines put above the prompt join the draft', function()
+    local view = new_view()
+    local buf = view.buf
+    view:open()
+    view:message('agent', 'hi')
+    local row = view:row()
+    vim.fn.setreg('a', 'one\ntwo\n', 'l')
+    -- P on the prompt line puts above it, into the output.
+    keys('Gadraft<Esc>"aP')
+    pause(20)
+    assert(view:row() == row and view:draft() == 'one\ntwo\ndraft', text(buf))
+    assert(text(buf) == 'Agent:\nhi\nPrompt: one\ntwo\ndraft', text(buf))
+    assert(api.nvim_win_get_cursor(0)[1] == row + 1)
+    assert(marks(buf, row, 'hl_group', 'BoomerUserLabel'))
+    -- One undo step takes back the put.
+    keys('u')
+    pause(20)
+    assert(view:row() == row and view:draft() == 'draft', text(buf))
+
+    -- A linewise <C-R> puts above the cursor line too.
+    keys('A <C-R>a<Esc>')
+    pause(20)
+    assert(view:draft() == 'one\ntwo\ndraft ', vim.inspect(view:draft()))
+    -- Output written before the scheduled move goes above the pasted lines.
+    view:set_draft('draft')
+    keys('"aP')
+    view:message('agent', ' there')
+    assert(text(buf) == 'Agent:\nhi there\nPrompt: one\ntwo\ndraft', text(buf))
+    pause(20)
+    assert(view:draft() == 'one\ntwo\ndraft')
+
+    -- Keys typed before the scheduled move see the draft: a mapping that
+    -- pastes and submits, two pastes, and an edit (its own undo step).
+    view:set_draft('draft')
+    local submitted
+    vim.keymap.set('i', '<F6>', function()
+        submitted = view:draft()
+    end, { buffer = buf })
+    keys('A<C-R>a<C-R>a<F6><Esc>')
+    assert(submitted == 'one\ntwo\none\ntwo\ndraft', vim.inspect(submitted))
+    view:set_draft('draft')
+    keys('"aPGA!<Esc>')
+    assert(view:draft() == 'one\ntwo\ndraft!', text(buf))
+    keys('u')
+    assert(view:draft() == 'one\ntwo\ndraft', text(buf))
+    keys('u')
+    assert(view:draft() == 'draft', text(buf))
+    -- Redo puts the lines back into the draft, without a second label.
+    keys('<C-R>')
+    pause(20)
+    assert(text(buf) == 'Agent:\nhi there\nPrompt: one\ntwo\ndraft', text(buf))
+    assert(view:row() == row and view:draft() == 'one\ntwo\ndraft', text(buf))
+
+    -- A draft that starts like the prompt survives undo and redo.
+    view:set_draft('Prompt: draft')
+    keys('"aPu<C-R>')
+    pause(20)
+    assert(view:draft() == 'one\ntwo\nPrompt: draft', vim.inspect(view:draft()))
+    -- Lines put just before a key read under textlock (an <expr> mapping)
+    -- are moved once it ends.
+    view:set_draft('draft')
+    vim.keymap.set('n', '<F7>', function()
+        vim.fn.getcharstr()
+        return ''
+    end, { buffer = buf, expr = true })
+    keys('G"aP<F7>x')
+    pause(20)
+    assert(view:draft() == 'one\ntwo\ndraft', vim.inspect(view:draft()))
+    api.nvim_buf_delete(buf, { force = true })
+end)
+
+test('registers insert at the cursor', function()
+    local buf = open({ version = 1, profile = 'codex-v2', steps = steps(load('codex-basic'), 1, 7) })
+    ready(buf)
+    api.nvim_set_current_win(vim.fn.win_findbuf(buf)[1])
+    vim.fn.setreg('a', 'one\ntwo\n', 'l')
+    vim.fn.setreg('b', 'x\ny', 'c')
+    -- A linewise register goes after the text typed, not above its line.
+    keys('Ahello <C-R>a<C-R><C-R>atail <C-R>b<Esc>')
+    assert(draft(buf) == 'hello one\ntwo\none\ntwo\ntail x\ny', vim.inspect(draft(buf)))
+    assert(not has(buf, 'one\ntwo\nPrompt:'), text(buf))
+    -- Other registers keep i_CTRL-R.
+    keys('A <C-R>=1+1<CR><Esc>')
+    assert(draft(buf):sub(-2) == ' 2', vim.inspect(draft(buf)))
+    finish()
+end)
+
 test('gutter signs', function()
     -- Each message's rows, and the draft's, show its role's sign; system lines none.
     local view = new_view()

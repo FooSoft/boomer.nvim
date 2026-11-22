@@ -15,6 +15,19 @@ local api = vim.api
 local ns = api.nvim_create_namespace('boomer')
 local sign_ns = api.nvim_create_namespace('boomer.sign')
 local prompt_ns = api.nvim_create_namespace('boomer.prompt')
+-- Views with user lines to move into the draft (View:adopt_lines). They are
+-- moved before the next key is handled, also within mappings and macros.
+local pending = setmetatable({}, { __mode = 'k' })
+vim.on_key(function()
+    for view in pairs(pending) do
+        -- Under textlock (such as an <expr> mapping) it is retried later.
+        if not pcall(view.flush, view) then
+            vim.schedule(function()
+                view:flush()
+            end)
+        end
+    end
+end, api.nvim_create_namespace('boomer.adopt'))
 
 ---@class boomer.View
 ---@field buf integer
@@ -31,6 +44,11 @@ local prompt_ns = api.nvim_create_namespace('boomer.prompt')
 ---@field busy? boolean The agent is busy: the live prompt is grayed out (View:set_busy).
 ---@field cwd? string Diff paths below it are shown relative to it.
 ---@field diff_lines? integer Lines of a tool call's diff shown; nil for all.
+---@field writing? boolean The view itself is changing the buffer (View:edit).
+---@field adopt? { first: integer, last: integer, tick: integer } Rows the user inserted right
+--- above the prompt, still to be moved into the draft (View:adopt_lines), and the changedtick
+--- after the insertion.
+---@field adopted table<integer, true> Undo sequence numbers of insertions moved into the draft.
 local View = {}
 View.__index = View
 
@@ -94,6 +112,7 @@ function View.new(opts)
             diff_lines = opts.diff_lines or nil,
             marks = {},
             queued = {},
+            adopted = {},
             -- prompt_setprompt() below, before the input mark exists, makes
             -- Neovim start the first output on a new line.
             submit = true,
@@ -111,9 +130,23 @@ function View.new(opts)
     api.nvim_buf_set_mark(buf, ':', 1, #prompt, {})
     -- Every change may move the prompt or change the line above it.
     api.nvim_buf_attach(buf, false, {
-        on_lines = function()
+        on_lines = function(_, _, tick, first, last, new_last)
             if not self:valid() then
+                pending[self] = nil
                 return true
+            end
+            -- Lines the user inserted right above the prompt (P, a linewise
+            -- <C-R>, :put!) pushed the input mark down past them. They are
+            -- moved into the draft before the next key or write, as the
+            -- buffer cannot be changed from here.
+            if not self.writing and last == first and self:row() == new_last then
+                local adopt = self.adopt
+                local from = adopt and adopt.last == first and adopt.first or first
+                self.adopt = { first = from, last = new_last, tick = tick }
+                pending[self] = true
+                vim.schedule(function()
+                    self:flush()
+                end)
             end
             self:decorate()
         end,
@@ -183,7 +216,86 @@ end
 
 -- The text being typed (all prompt lines).
 function View:draft()
+    self:flush()
     return vim.fn.prompt_getinput(self.buf)
+end
+
+-- Move lines the user inserted right above the prompt (self.adopt, rows
+-- first..last-1) into the start of the draft, where they were meant to go:
+-- the prompt moves up to their first line. Joined to the insertion's undo
+-- step if nothing changed since; a redo of such a step (self.adopted) puts
+-- the text back as it was, so only the input mark moves. They stay pending
+-- if the buffer cannot be changed now (textlock).
+function View:adopt_lines()
+    local adopt = self.adopt
+    local first, last = adopt.first, adopt.last
+    if self:row() == last then
+        local prompt = self.prompt
+        local function seq()
+            return vim.fn.undotree(self.buf).seq_cur
+        end
+        if not self.adopted[seq()] then
+            local cursors = {}
+            for _, win in ipairs(vim.fn.win_findbuf(self.buf)) do
+                cursors[win] = api.nvim_win_get_cursor(win)
+            end
+            local joined = api.nvim_buf_get_changedtick(self.buf) == adopt.tick
+                and api.nvim_buf_call(self.buf, function()
+                    return pcall(vim.cmd.undojoin)
+                end)
+            local line = api.nvim_buf_get_lines(self.buf, last, last + 1, false)[1]
+            local strip = line:sub(1, #prompt) == prompt
+            if strip then
+                api.nvim_buf_set_text(self.buf, last, 0, last, #prompt, {})
+            end
+            api.nvim_buf_set_text(self.buf, first, 0, first, 0, { prompt })
+            if joined then
+                self.adopted[seq()] = true
+            end
+            for win, pos in pairs(cursors) do
+                if pos[1] == first + 1 then
+                    pos[2] = pos[2] + #prompt
+                elseif pos[1] == last + 1 and strip then
+                    pos[2] = math.max(pos[2] - #prompt, 0)
+                end
+                api.nvim_win_set_cursor(win, pos)
+            end
+        end
+        api.nvim_buf_set_mark(self.buf, ':', first + 1, #prompt, {})
+    end
+    self.adopt = nil
+    pending[self] = nil
+    self:decorate()
+end
+
+-- Move pending user insertions above the prompt into the draft. Output
+-- positions are read through this, so nothing is written below them.
+function View:flush()
+    if not self:valid() then
+        pending[self] = nil
+    elseif self.adopt then
+        self:edit(function() end)
+    end
+end
+
+-- Change the buffer with `fn`: user insertions above the prompt are first
+-- moved into the draft, and the change is not mistaken for one of them.
+function View:edit(fn)
+    if not self:valid() then
+        return
+    end
+    local writing = self.writing
+    self.writing = true
+    local ok, err = pcall(function()
+        if self.adopt then
+            self:adopt_lines()
+        end
+        fn()
+    end)
+    self.writing = writing
+    if not ok then
+        error(err, 0)
+    end
 end
 
 -- Replace the draft, keeping the input mark. A cursor in the draft moves to
@@ -192,11 +304,14 @@ function View:set_draft(text)
     if not self:valid() then
         return
     end
-    local row = self:row()
+    local row
     local lines = vim.split(text, '\n', { plain = true })
     lines[1] = self.prompt .. lines[1]
-    api.nvim_buf_set_lines(self.buf, row, -1, false, lines)
-    api.nvim_buf_set_mark(self.buf, ':', row + 1, #self.prompt, {})
+    self:edit(function()
+        row = self:row()
+        api.nvim_buf_set_lines(self.buf, row, -1, false, lines)
+        api.nvim_buf_set_mark(self.buf, ':', row + 1, #self.prompt, {})
+    end)
     for _, win in ipairs(vim.fn.win_findbuf(self.buf)) do
         if api.nvim_win_get_cursor(win)[1] > row then
             api.nvim_win_set_cursor(win, { row + #lines, #lines[#lines] })
@@ -301,6 +416,7 @@ end
 
 -- End of the output region; prompt_appendbuf continues this line.
 function View:output_end()
+    self:flush()
     local row = self:row() - 1
     if row < 0 then
         return 0, 0
@@ -319,7 +435,9 @@ function View:append(text)
     local marks = col > 0
             and api.nvim_buf_get_extmarks(self.buf, ns, { row, 0 }, { row, -1 }, { details = true })
         or {}
-    vim.fn.prompt_appendbuf(self.buf, vim.split(text, '\n', { plain = true }))
+    self:edit(function()
+        vim.fn.prompt_appendbuf(self.buf, vim.split(text, '\n', { plain = true }))
+    end)
     for _, m in ipairs(marks) do
         local d = m[4]
         if d.end_row == row then
@@ -340,6 +458,7 @@ end
 -- Separator that starts a new block after exactly one blank line, given
 -- what the output ends with and whether Neovim starts it on a new line.
 function View:gap()
+    self:flush()
     local row = self:row()
     local lines = api.nvim_buf_get_lines(self.buf, math.max(row - 2, 0), row, false)
     if #lines == 0 then
@@ -528,9 +647,11 @@ end
 -- any other. Neovim starts the next output on a new line once the callback
 -- returns; nothing may be written before then.
 function View:uncommit(text)
-    local row = self:row()
     local n = #vim.split(text, '\n', { plain = true })
-    api.nvim_buf_set_lines(self.buf, math.max(row - n, 0), row, false, {})
+    self:edit(function()
+        local row = self:row()
+        api.nvim_buf_set_lines(self.buf, math.max(row - n, 0), row, false, {})
+    end)
     self.submit = true
 end
 
