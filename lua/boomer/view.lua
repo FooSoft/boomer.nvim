@@ -10,11 +10,13 @@
 -- commits submitted drafts. Extmarks in `ns` highlight labels, system lines
 -- and diffs; extmarks in `sign_ns` span messages to show their role's sign;
 -- extmarks in `prompt_ns` decorate the live prompt and follow it
--- (View:decorate). Nothing else tracks positions.
+-- (View:decorate); extmarks in `plain_ns` span system blocks, which are left
+-- out of the Markdown parse (View:exclude_plain). Nothing else tracks positions.
 local api = vim.api
 local ns = api.nvim_create_namespace('boomer')
 local sign_ns = api.nvim_create_namespace('boomer.sign')
 local prompt_ns = api.nvim_create_namespace('boomer.prompt')
+local plain_ns = api.nvim_create_namespace('boomer.plain')
 -- Views with user lines to move into the draft (View:adopt_lines). They are
 -- moved before the next key is handled, also within mappings and macros.
 local pending = setmetatable({}, { __mode = 'k' })
@@ -49,6 +51,8 @@ end, api.nvim_create_namespace('boomer.adopt'))
 --- above the prompt, still to be moved into the draft (View:adopt_lines), and the changedtick
 --- after the insertion.
 ---@field adopted table<integer, true> Undo sequence numbers of insertions moved into the draft.
+---@field plain? boolean System blocks were written, to leave out of the Markdown parse.
+---@field parser? vim.treesitter.LanguageTree Parser told to leave out system blocks.
 local View = {}
 View.__index = View
 
@@ -147,6 +151,13 @@ function View.new(opts)
                 vim.schedule(function()
                     self:flush()
                 end)
+            end
+            -- A new parser (treesitter restarted) is told on its first change.
+            if
+                self.plain
+                and vim.treesitter.get_parser(self.buf, nil, { error = false }) ~= self.parser
+            then
+                self:exclude_plain()
             end
             self:decorate()
         end,
@@ -492,6 +503,77 @@ function View:write(text, group)
             hl_group = group or 'BoomerSystem',
             priority = 150,
         })
+        -- The text ends before the empty row the output continues on. Text
+        -- replaced at either edge (or restored by undo) stays in the block.
+        local last = end_row - 1
+        api.nvim_buf_set_extmark(self.buf, plain_ns, last - select(2, text:gsub('\n', '')), 0, {
+            end_row = last,
+            end_col = #api.nvim_buf_get_lines(self.buf, last, last + 1, false)[1],
+            right_gravity = false,
+            end_right_gravity = true,
+        })
+        self.plain = true
+        self:exclude_plain()
+    end
+end
+
+-- Leave system blocks out of the Markdown parse: they are not Markdown, and
+-- one could open a block that never closes (such as a code fence in a tool's
+-- command), turning the rest of the transcript into code. The parse covers
+-- the text between them and after the last one. Each range starts at the
+-- end of a block's last line rather than on the next row, so that output
+-- appended on that row is never left out with the block.
+-- An edit before the next parse restores the regions of the last parse (or
+-- drops them, if it was invalidated), and undo restores extmarks after all
+-- change callbacks; so the regions are set again right before every parse,
+-- once edits have settled. This wraps the parser's internal `_parse`, which
+-- an async parse also restarts with after an edit. Parsing at once instead
+-- would process injections in the whole transcript.
+function View:exclude_plain()
+    local parser = vim.treesitter.get_parser(self.buf, nil, { error = false })
+    if not parser then
+        return
+    end
+    if self.parser ~= parser then
+        self.parser = parser
+        local parse = parser._parse
+        parser._parse = function(tree, range, ...)
+            if self.parser == parser and self:valid() then
+                self:exclude_plain()
+                -- Without a range, only a tree covering the whole buffer is
+                -- parsed; a range in the regions also parses ours.
+                if not range then
+                    local first = parser:included_regions()[1][1]
+                    range = { first[1], first[2], first[1] + 1, 0 }
+                end
+            end
+            return parse(tree, range, ...)
+        end
+    end
+    local function byte(row, col)
+        return api.nvim_buf_get_offset(self.buf, row) + col
+    end
+    local function before(r1, c1, r2, c2)
+        return r1 < r2 or r1 == r2 and c1 < c2
+    end
+    local ranges, row, col = {}, 0, 0
+    for _, m in ipairs(api.nvim_buf_get_extmarks(self.buf, plain_ns, 0, -1, { details = true })) do
+        local d = m[4]
+        -- Blocks whose text was deleted or replaced collapse or invert.
+        if before(m[2], m[3], d.end_row, d.end_col) then
+            if before(row, col, m[2], m[3]) then
+                ranges[#ranges + 1] = { row, col, byte(row, col), m[2], m[3], byte(m[2], m[3]) }
+            end
+            if before(row, col, d.end_row, d.end_col) then
+                row, col = d.end_row, d.end_col
+            end
+        end
+    end
+    -- An end past any edit keeps the last range open to text appended later.
+    local open = 0xFFFFFFFF
+    ranges[#ranges + 1] = { row, col, byte(row, col), open, open, open }
+    if not vim.deep_equal(parser:included_regions(), { ranges }) then
+        parser:set_included_regions({ ranges })
     end
 end
 

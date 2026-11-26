@@ -561,6 +561,112 @@ test('view rendering', function()
     api.nvim_buf_delete(view.buf, { force = true })
 end)
 
+test('system text stays out of the Markdown parse', function()
+    local view = new_view()
+    local buf = view.buf
+    view:open()
+    -- Types of the Markdown nodes at the start of the row holding `needle`,
+    -- as parsed for highlighting, or in `trees`.
+    local function nodes(needle, trees)
+        if not trees then
+            vim.cmd.redraw()
+            trees = vim.treesitter.get_parser(buf):trees()
+        end
+        local row = row_of(buf, needle)
+        local node = trees[1]:root()
+        node = node:named_descendant_for_range(row, 0, row, 0)
+        local types = {}
+        while node do
+            types[#types + 1] = node:type()
+            node = node:parent()
+        end
+        return table.concat(types, ' ')
+    end
+    view:message('agent', 'intro', 'a1')
+    -- A command whose lines open a code fence and an HTML comment, never closed.
+    view:write("[Tool: python3 - <<'EOF'\nrep('''x\n```''', '''y\n<!-- z\nEOF]")
+    view:message('agent', '# Heading\nafter', 'a2')
+    assert(not nodes('[Tool:'):find('paragraph'), nodes('[Tool:'))
+    assert(not nodes('```'):find('code'), nodes('```'))
+    assert(nodes('# Heading'):find('atx_heading'), nodes('# Heading'))
+    assert(not nodes('after'):find('code'), nodes('after'))
+    view:write('Error: ~~~')
+    view:message('user', 'mine', 'u1')
+    view:message('agent', '```\nlocal x\n```\nlater', 'a3')
+    keys('Adraft<Esc>')
+    assert(not nodes('Prompt: mine'):find('code'), nodes('Prompt: mine'))
+    assert(nodes('local x'):find('fenced_code_block'), nodes('local x'))
+    assert(not nodes('later'):find('code'), nodes('later'))
+    assert(not nodes('Prompt: draft'):find('code'), nodes('Prompt: draft'))
+    -- Regions are restored after the parser drops them, and on a new parser.
+    vim.treesitter.get_parser(buf):invalidate(true)
+    view:message('agent', 'reloaded', 'a4')
+    assert(nodes('reloaded'):find('paragraph'), nodes('reloaded'))
+    assert(not nodes('after'):find('code'), nodes('after'))
+    vim.treesitter.start(buf, 'markdown_inline')
+    vim.treesitter.start(buf, 'markdown')
+    view:message('agent', 'restarted', 'a5')
+    assert(not nodes('after'):find('code'), nodes('after'))
+    api.nvim_buf_delete(buf, { force = true })
+
+    -- Edits to the transcript: a line inserted into a block, a block deleted
+    -- and restored by undo, and a block replaced.
+    view = new_view()
+    buf = view.buf
+    view:open()
+    view:write('tool\n```')
+    view:message('agent', '# Top', 'b1')
+    api.nvim_buf_set_lines(buf, 1, 1, false, { 'inserted' })
+    assert(nodes('# Top'):find('atx_heading'), nodes('# Top'))
+    -- Break the undo sequence, so that undo only restores the block.
+    vim.o.undolevels = vim.o.undolevels
+    vim.cmd('silent 1,3delete')
+    assert(nodes('# Top'):find('atx_heading'), nodes('# Top'))
+    vim.cmd('silent undo')
+    assert(api.nvim_buf_get_lines(buf, 2, 3, false)[1] == '```', text(buf))
+    assert(nodes('# Top'):find('atx_heading'), nodes('# Top'))
+    vim.o.undolevels = vim.o.undolevels
+    vim.cmd('silent 3s/```/---/')
+    assert(nodes('# Top'):find('atx_heading'), nodes('# Top'))
+    vim.cmd('silent undo')
+    assert(nodes('# Top'):find('atx_heading'), nodes('# Top'))
+    -- Text replaced at the start of a block stays in it.
+    vim.cmd('silent 1s/tool/```/')
+    assert(nodes('# Top'):find('atx_heading'), nodes('# Top'))
+    api.nvim_buf_set_lines(buf, 0, 3, false, { 'replaced' })
+    view:write('```')
+    view:message('agent', '# Last', 'b2')
+    assert(nodes('# Last'):find('atx_heading'), nodes('# Last'))
+    -- A parse without a range (only the root tree) parses the regions too.
+    view:write('```')
+    view:message('agent', '# Plain', 'b3')
+    local parser = vim.treesitter.get_parser(buf)
+    parser:parse()
+    assert(parser:is_valid(true), 'the root tree was not parsed')
+    local plain = nodes('# Plain', parser:trees())
+    assert(plain:find('atx_heading'), plain)
+    api.nvim_buf_delete(buf, { force = true })
+
+    -- Output arriving while an async parse is paused restarts that parse.
+    view = new_view()
+    buf = view.buf
+    view:open()
+    view:write('```')
+    view:message('agent', ('# Long\n\nsome *words* here\n\n'):rep(20000), 'c1')
+    local done
+    vim.treesitter.get_parser(buf):parse(true, function()
+        done = true
+    end)
+    assert(not done, 'the parse did not pause')
+    view:message('agent', 'more', 'c2')
+    assert(vim.wait(5000, function()
+        return done
+    end))
+    local long = nodes('# Long', vim.treesitter.get_parser(buf):trees())
+    assert(long:find('atx_heading'), long)
+    api.nvim_buf_delete(buf, { force = true })
+end)
+
 test('lines put above the prompt join the draft', function()
     local view = new_view()
     local buf = view.buf
