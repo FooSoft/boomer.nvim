@@ -20,7 +20,7 @@ local fake = root .. '/tests/support/fake' .. (windows and '.cmd' or '')
 -- Agents run in Neovim's working directory. Scenarios spell it "/tmp"; load()
 -- replaces that with the directory as the plugin sends it.
 vim.fn.chdir(windows and vim.uv.os_tmpdir() or '/tmp')
-local cwd = require('boomer.config').resolve().cwd
+local cwd = require('boomer.config').cwd()
 -- Only the fake codex and copilot are installed; other built-in profiles are
 -- made missing so the agent picker does not depend on the machine.
 local absent = {}
@@ -321,7 +321,7 @@ test('commands', function()
         },
         commands = { help = false, review = { prompt = 'Review $ARGUMENTS' } },
     })
-    local p = assert(config.resolve())
+    local p = assert(config.resolve('myagent'))
     assert(p.name == 'myagent' and p.protocol == 'acp' and p.model == 'sonnet' and p.cwd == cwd)
     assert(vim.deep_equal(p.args, {}) and vim.deep_equal(p.options, {}))
     p = assert(config.resolve('copilot'))
@@ -333,16 +333,15 @@ test('commands', function()
     p.args[1] = 'changed'
     assert(config.resolve('copilot').args[1] == '--acp', 'resolve copies')
 
-    -- The agent picker offers installed profiles, the default and the current one.
+    -- The agent picker offers installed profiles and the current one.
     boomer.setup({
-        agent = 'goose',
         agents = vim.tbl_extend('force', absent, {
             codex = { command = fake },
             copilot = { command = '/missing-boomer-copilot' },
         }),
     })
     assert(
-        vim.deep_equal(config.installed_agent_names('kimi'), { 'codex', 'goose', 'kimi' }),
+        vim.deep_equal(config.installed_agent_names('kimi'), { 'codex', 'kimi' }),
         vim.inspect(config.installed_agent_names('kimi'))
     )
 
@@ -374,7 +373,8 @@ test('commands', function()
         config.resolve('codex').label == 'Bot:' and config.resolve('copilot').label == 'Copilot:'
     )
     boomer.setup()
-    assert(config.options.window.position == 'right' and config.resolve().label == 'Agent:')
+    assert(config.options.window.position == 'right' and config.resolve('codex').label == 'Agent:')
+    assert(config.options.agent == nil, 'no agent is assumed')
 end)
 
 test('slash command parsing', function()
@@ -456,19 +456,125 @@ test('status rendering', function()
 end)
 
 test('health', function()
-    boomer.setup({
-        agents = {
-            codex = { command = '/missing-boomer-a' },
-            copilot = { command = '/missing-boomer-b' },
-        },
+    local agents = vim.tbl_extend('force', absent, {
+        codex = { command = '/missing-boomer-a' },
+        copilot = { command = fake },
     })
+    boomer.setup({ agents = agents })
     vim.cmd('checkhealth boomer')
     local out = text(api.nvim_get_current_buf())
+    assert(out:find('codex (codex: /missing-boomer-a): executable not found', 1, true), out)
+    assert(not out:find('[default]', 1, true) and not out:find('No agent is installed'), out)
+    vim.cmd('bwipeout!')
+    -- The agent set by the `agent` option is required, and one agent is.
+    agents.copilot = { command = '/missing-boomer-b' }
+    boomer.setup({ agent = 'codex', agents = agents })
+    vim.cmd('checkhealth boomer')
+    out = text(api.nvim_get_current_buf())
     assert(
         out:find('codex (codex: /missing-boomer-a) [default]: executable not found', 1, true),
         out
     )
+    assert(out:find('No agent is installed', 1, true), out)
     vim.cmd('bwipeout!')
+    boomer.setup()
+end)
+
+test('agent choice', function()
+    -- Without the `agent` option, the only installed agent starts.
+    local function agents(copilot)
+        return vim.tbl_extend('force', absent, {
+            codex = { command = fake },
+            copilot = { command = copilot },
+        })
+    end
+    boomer.setup({ agents = agents('/missing-boomer-copilot') })
+    stage(load('codex-basic'))
+    local buf = boomer.open()
+    assert(state(buf).agent == 'codex', vim.inspect(boomer.status()))
+    send(buf)
+    turn(buf)
+    finish()
+
+    -- With several, the user picks one; then the prompt is sent.
+    boomer.setup({ agents = agents(fake) })
+    stage(load('codex-basic'))
+    local offered
+    vim.ui.select = function(items, opts, cb)
+        offered = vim.tbl_map(opts.format_item, items)
+        cb('codex')
+    end
+    assert(boomer.run('hello') == true and boomer.status() == nil)
+    await(function()
+        return boomer.status() ~= nil
+    end, 'agent picked')
+    buf = boomer.status().buf
+    turn(buf)
+    assert(vim.deep_equal(offered, { 'codex (codex)', 'copilot (acp)' }), vim.inspect(offered))
+    finish()
+    -- The agent last started starts again, without a picker.
+    stage(load('codex-basic'))
+    buf = boomer.open()
+    assert(state(buf).agent == 'codex', vim.inspect(boomer.status()))
+    send(buf)
+    turn(buf)
+    finish()
+
+    -- An agent picker made stale by setup(), /close or a newer picker is
+    -- ignored; a range keeps the lines selected before the pick.
+    boomer.setup({ agents = agents(fake) })
+    local answers = {}
+    vim.ui.select = function(_, _, cb)
+        answers[#answers + 1] = cb
+    end
+    local function picked(n)
+        await(function()
+            return #answers == n
+        end, 'agent picker ' .. n)
+    end
+    local function ignored(n, how)
+        answers[n]('codex')
+        pause(20)
+        assert(boomer.status() == nil, 'stale agent picker answered after ' .. how)
+    end
+    assert(boomer.open() == nil)
+    picked(1)
+    boomer.setup({ agents = agents(fake) })
+    ignored(1, 'setup()')
+    assert(boomer.new() == true)
+    picked(2)
+    boomer.close()
+    ignored(2, '/close')
+    assert(boomer.open() == nil)
+    picked(3)
+    local src = api.nvim_create_buf(false, true)
+    api.nvim_buf_set_lines(src, 0, -1, false, { 'one', 'two' })
+    assert(boomer.run('', { buf = src, line1 = 2, line2 = 2 }) == true)
+    picked(4)
+    ignored(3, 'a newer picker')
+    api.nvim_buf_set_lines(src, 0, 0, false, { 'zero' })
+    stage(load('codex-basic'))
+    answers[4]('codex')
+    await(function()
+        return boomer.status() ~= nil
+    end, 'agent picked')
+    buf = boomer.status().buf
+    assert(draft(buf) == '[No Name]:2\n```\ntwo\n```', draft(buf))
+    api.nvim_buf_delete(src, { force = true })
+    send(buf)
+    turn(buf)
+    finish()
+
+    -- Without any installed agent, nothing starts.
+    boomer.setup({
+        agents = vim.tbl_extend('force', agents('/missing-boomer-copilot'), {
+            codex = { command = '/missing-boomer-codex' },
+        }),
+    })
+    local before = #notices
+    assert(boomer.open() == nil and boomer.agent() == nil and boomer.status() == nil)
+    assert(#notices == before + 2, vim.inspect(notices))
+    assert(notices[#notices] == 'No agent is installed; see :help boomer-agents', notices[#notices])
     boomer.setup()
 end)
 
@@ -1521,6 +1627,7 @@ test('process failures', function()
     assert(has(buf, 'Error: unsupported ACP version'), text(buf))
     boomer.close()
     boomer.setup({
+        agent = 'codex',
         agents = { codex = { command = '/missing-boomer-test-executable' } },
     })
     buf = boomer.open()

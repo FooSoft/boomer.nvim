@@ -22,7 +22,7 @@ The plugin is configured via the optional `setup` function. Options may be provi
 
 ```lua
 require('boomer').setup({
-    agent = 'codex',
+    agent = nil,
     agents = {},
     commands = {},
     winbar = true,
@@ -35,7 +35,7 @@ require('boomer').setup({
 
 #### `agent`
 
-Specifies which agent profile is started by `:Boomer`. See [Agents](#agents) for the built-in profiles.
+Specifies which agent profile a new chat starts, such as `'copilot'`. No agent is assumed by default: a new chat then starts the agent last started, or the only one installed, or asks which installed one to start. See [Agents](#agents) for the built-in profiles.
 
 #### `agents`
 
@@ -142,7 +142,7 @@ Slash commands advertised by ACP agents (such as Copilot's `/plan`) are sent to 
 
 #### `Boomer`
 
-Opens or focuses the chat, starting the default agent. If the agent has exited, restarts it in the same window, keeping the draft.
+Opens or focuses the chat, starting an agent as set by [`agent`](#agent). If the agent has exited, restarts it in the same window, keeping the draft.
 
 #### `Boomer {text}`
 

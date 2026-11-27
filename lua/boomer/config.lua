@@ -39,8 +39,8 @@ local builtin = {
     vibe = { protocol = 'acp', command = 'vibe-acp', args = {} },
 }
 
+-- No agent is assumed to be installed: `agent` is unset by default.
 local defaults = {
-    agent = 'codex',
     agents = {},
     commands = {},
     winbar = true,
@@ -198,8 +198,8 @@ function M.set(opts)
             error('boomer: agents.' .. name .. ' needs `protocol` and `command`', 0)
         end
     end
-    local agent = opts.agent or defaults.agent
-    if not agents[agent] then
+    local agent = opts.agent
+    if agent and not agents[agent] then
         error('boomer: unknown agent: ' .. agent, 0)
     end
 
@@ -233,20 +233,16 @@ function M.agent_names()
     return names
 end
 
--- Sorted names of the profiles whose executable is installed, plus the
--- default agent and `keep` (the current one), offered by the agent picker.
+-- Sorted names of the profiles whose executable is installed, plus `keep`
+-- (the current one), offered by the agent picker.
 ---@param keep? string
 ---@return string[]
 function M.installed_agent_names(keep)
     return vim.tbl_filter(function(name)
-        return name == M.options.agent
-            or name == keep
-            or vim.fn.executable(M.options.agents[name].command) == 1
+        return name == keep or vim.fn.executable(M.options.agents[name].command) == 1
     end, M.agent_names())
 end
 
--- A copy of the named profile (the default agent when nil), completed with
--- its name, Neovim's working directory and a label.
 -- Neovim's working directory, absolute, as agents spell it.
 ---@return string
 function M.cwd()
@@ -258,10 +254,11 @@ function M.cwd()
     return cwd
 end
 
----@param name? string
+-- A copy of the named profile, completed with its name, Neovim's working
+-- directory and a label.
+---@param name string
 ---@return boomer.Profile?, string? err
 function M.resolve(name)
-    name = name or M.options.agent
     local p = M.options.agents[name]
     if not p then
         return nil, 'Unknown agent: ' .. tostring(name)

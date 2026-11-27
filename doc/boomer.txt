@@ -110,12 +110,13 @@ load also returns them to the draft.
 3. COMMANDS                                                  *boomer-commands*
 
                                                         *:Boomer*
-:Boomer                 Open or focus the chat, starting the default agent.
+:Boomer                 Open or focus the chat, starting an agent (see
+                        |boomer-start|).
 
 :Boomer {text}          Submit {text} as if typed in the prompt and sent
                         with <CR>: a prompt is sent (queued during a turn,
-                        |boomer-queue|), starting the default agent if there
-                        is no chat; `//text` sends `/text`. The chat is shown
+                        |boomer-queue|), starting an agent if there is no
+                        chat; `//text` sends `/text`. The chat is shown
                         in the current tab page, but the current window stays
                         current, so you keep editing while the reply streams.
                         A line that cannot be sent or run now only warns.
@@ -232,7 +233,7 @@ line is not shown. Plain |:Boomer| writes no result.
 /resume [{id}]                                          *boomer-/resume*
         Load a saved session for Neovim's current working directory, which
         may differ from the one the agent started in. Without a chat, this
-        starts the default agent first; then dismissing the picker, or
+        starts an agent first (|boomer-start|); then dismissing the picker, or
         having no saved sessions, starts a new session. Choosing the open
         session keeps it and writes `[Session: {title} (current)]`. Like
         `/new` and `/agent`, it carries the draft over to the new buffer.
@@ -285,8 +286,9 @@ Calling `setup()` is optional. Options apply to the next chat; an invalid
 option raises an error. Defaults: >lua
 
     require('boomer').setup({
-        -- Profile started by :Boomer.
-        agent = 'codex',
+        -- Profile a new chat starts, such as 'copilot'; see
+        -- |boomer-start|.
+        agent = nil,
         -- Agent profiles, merged with the built-in ones; see |boomer-agents|.
         agents = {},
         -- User slash commands; see |boomer-user-commands|.
@@ -401,8 +403,15 @@ The ACP profiles (`protocol = 'acp'`):
   vibe          `vibe-acp`                    Mistral Vibe
 
 The `/agent` picker and completion list the profiles whose executable is
-installed, plus the default and current ones; `:Boomer /agent {name}` accepts
-any profile.
+installed, plus the current one; `:Boomer /agent {name}` accepts any profile.
+
+                                                        *boomer-start*
+No agent is assumed to be installed. A new chat (|:Boomer| without one, or
+|boomer-/new| and |boomer-/resume|) starts the profile set by the `agent`
+option (|boomer-config|); without it, the agent last started in this Neovim
+session (until `setup()` is called again), or the only installed one, or the
+one picked from the installed ones, after which the command runs. With none
+installed, Boomer warns.
 
 Fields given in `setup({ agents = ... })` replace the built-in fields of the
 same name (`args` is replaced, not appended). Profile fields:
@@ -590,7 +599,8 @@ All functions are in `require('boomer')`. Command functions return true when
 the command started, or nil after a warning.
 
   setup({opts})         See |boomer.setup()|.
-  open()                Open or focus the chat; returns its buffer.
+  open()                Open or focus the chat; returns its buffer (nil while
+                        the agent to start is picked, |boomer-start|).
   run({line})           Run a |:Boomer| line, such as `'/model gpt-5'` or a
                         prompt.
   model([{value}]), effort([{value}]), mode([{value}]),

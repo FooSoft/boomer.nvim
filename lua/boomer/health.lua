@@ -30,12 +30,13 @@ function M.check()
 
     local config = require('boomer.config')
     health.start('boomer agents')
+    local installed = 0
     for _, name in ipairs(config.agent_names()) do
         local p = config.options.agents[name]
         local label = ('%s (%s: %s)'):format(name, p.protocol, p.command)
         local default = name == config.options.agent and ' [default]' or ''
         if vim.fn.executable(p.command) == 0 then
-            -- Only the default agent is required.
+            -- Only the agent set by the `agent` option is required.
             local msg = label .. default .. ': executable not found'
             if default ~= '' then
                 health.error(msg, { 'Install it or set `agents.' .. name .. '.command`' })
@@ -43,9 +44,15 @@ function M.check()
                 health.info(msg)
             end
         else
+            installed = installed + 1
             local v = version(p.command)
             health.ok(label .. default .. (v and (': ' .. v) or ''))
         end
+    end
+    if installed == 0 then
+        health.error('No agent is installed', {
+            'Install one of the agents above, or add a profile with `agents`',
+        })
     end
 end
 

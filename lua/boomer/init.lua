@@ -80,12 +80,19 @@ local M = {}
 
 ---@type boomer.Chat?
 local chat
+-- Profile name of the agent last started; a new chat starts it again.
+---@type string?
+local last
+-- Generation of the picker of the agent to start: setup(), close(), starting
+-- a chat or a newer such picker makes an open one stale; its answer is dropped.
+local agent_picks = 0
 local group = vim.api.nvim_create_augroup('Boomer', { clear = true })
 
 -- Validate and apply options; see :help boomer-config.
 ---@param opts? table
 function M.setup(opts)
     config.set(opts)
+    last, agent_picks = nil, agent_picks + 1
 end
 
 -- Merge status fields (vim.NIL clears one) and announce the change.
@@ -901,14 +908,15 @@ local function choose(c, fresh)
     end)
 end
 
--- Start a chat. o.agent: profile name (default agent when nil); o.pick: choose
--- a saved session; o.id: load that session; o.wins: windows to show it in;
--- o.draft: initial draft; o.announce: confirm it once ready (see load()).
+-- Start a chat. o.agent: profile name; o.pick: choose a saved session; o.id:
+-- load that session; o.wins: windows to show it in; o.draft: initial draft;
+-- o.announce: confirm it once ready (see load()).
 local function start(o)
     local profile, perr = config.resolve(o.agent)
     if not profile then
         return warn(perr)
     end
+    last, agent_picks = profile.name, agent_picks + 1
     ---@type boomer.Chat
     local c = {
         opts = profile,
@@ -992,6 +1000,71 @@ local function restart(c, o)
     vim.api.nvim_buf_delete(old, { force = true })
 end
 
+-- Picker options for agent profile names, marking `current`.
+local function agent_picker(current)
+    return {
+        prompt = 'Boomer agent:',
+        format_item = function(n)
+            return ('%s (%s)%s'):format(
+                n,
+                config.options.agents[n].protocol,
+                n == current and ' [current]' or ''
+            )
+        end,
+    }
+end
+
+local no_agent = 'No agent is installed; see :help boomer-agents'
+
+-- The agent to (re)start in place of chat `c`: its own; without a chat, the
+-- `agent` option, the agent last started or the only one installed. Else
+-- returns nil after warning that none is installed, or nil, true while the
+-- user picks one; the choice is then remembered and retry() runs, unless the
+-- picker went stale (see agent_picks).
+---@param c? boomer.Chat
+---@param retry fun()
+---@return string?, boolean?
+local function agent_for(c, retry)
+    local name = c and c.opts.name or config.options.agent or last
+    if name then
+        return name
+    end
+    local names = config.installed_agent_names()
+    if #names == 1 then
+        return names[1]
+    elseif #names == 0 then
+        return warn(no_agent)
+    end
+    agent_picks = agent_picks + 1
+    local token = agent_picks
+    local function current()
+        return agent_picks == token
+    end
+    select(names, agent_picker(), function(choice)
+        if choice and current() then
+            last = choice
+            retry()
+        end
+    end, current)
+    return nil, true
+end
+
+-- The chat, started if there is none or restarted if its agent exited; nil
+-- if it could not start, or nil, true while the agent is picked (see
+-- agent_for()).
+---@param retry fun()
+---@return boomer.Chat?, boolean?
+local function ensure(retry)
+    if not chat or chat.dead then
+        local name, picking = agent_for(chat, retry)
+        if not name then
+            return nil, picking
+        end
+        restart(chat, { agent = name })
+    end
+    return chat
+end
+
 -- Public API (see :help boomer-api) --------------------------------------------
 --
 -- Command functions return true when they ran (or started running), and nil
@@ -1001,25 +1074,29 @@ end
 
 -- Open or focus the chat, starting one if needed, or restarting an agent that
 -- exited; shows a permission request again if its picker was closed without
--- an answer. Returns the chat buffer.
----@return integer?
-function M.open()
-    if chat and chat.dead then
-        restart(chat, { agent = chat.opts.name })
-    elseif not chat then
-        start({})
+-- an answer. Returns the chat buffer; nil if no chat could start, or nil, true
+-- while the agent to start is picked (then retry() runs).
+---@param retry fun()
+---@return integer?, boolean?
+local function open(retry)
+    local c, picking = ensure(retry)
+    if not c then
+        return nil, picking
     end
-    if not chat then
-        return nil
-    end
-    chat.view:open()
-    local req = pending(chat)
+    c.view:open()
+    local req = pending(c)
     if req then
-        show(chat, req)
+        show(c, req)
     else
         insert(vim.api.nvim_get_current_win())
     end
-    return chat.view.buf
+    return c.view.buf
+end
+
+-- See open(); returns the chat buffer, nil while the agent to start is picked.
+---@return integer?
+function M.open()
+    return (open(M.open))
 end
 
 -- Settings ----------------------------------------------------------------------
@@ -1165,7 +1242,13 @@ function M.resume(id)
     if not check(c, 'switch') then
         return
     elseif not c or c.dead then
-        restart(c, { agent = c and c.opts.name, pick = not id, id = id, announce = 'session' })
+        local name, picking = agent_for(c, function()
+            M.resume(id)
+        end)
+        if not name then
+            return picking
+        end
+        restart(c, { agent = name, pick = not id, id = id, announce = 'session' })
     elseif not id then
         choose(c, false)
     elseif id == c.session then
@@ -1182,7 +1265,11 @@ function M.new()
     if not check(c, 'switch') then
         return
     elseif not c or c.dead then
-        restart(c, { agent = c and c.opts.name, announce = 'session' })
+        local name, picking = agent_for(c, M.new)
+        if not name then
+            return picking
+        end
+        restart(c, { agent = name, announce = 'session' })
     else
         switch(c, nil, config.cwd())
     end
@@ -1198,23 +1285,16 @@ function M.agent(name)
         return
     elseif not name then
         local current = c and c.opts.name
-        local opts = {
-            prompt = 'Boomer agent:',
-            format_item = function(n)
-                return ('%s (%s)%s'):format(
-                    n,
-                    config.options.agents[n].protocol,
-                    n == current and ' [current]' or ''
-                )
-            end,
-        }
+        local opts = agent_picker(current)
         local function chosen(choice)
             if choice and chat == c then
                 M.agent(choice)
             end
         end
         local names = config.installed_agent_names(current)
-        if c and not c.dead then
+        if #names == 0 then
+            return warn(no_agent)
+        elseif c and not c.dead then
             pick(c, names, opts, chosen)
         else
             select(names, opts, chosen)
@@ -1300,6 +1380,7 @@ end
 
 -- Stop the agent and wipe the chat buffer.
 function M.close()
+    agent_picks = agent_picks + 1
     local c = chat
     if c then
         close(c)
@@ -1310,14 +1391,27 @@ function M.close()
     return true
 end
 
--- Lines line1..line2 of `buf` (unsaved edits included) as a fenced code block
--- headed by their location, relative to `cwd` when inside it; also returns
--- the location.
-local function snippet(buf, line1, line2, cwd)
-    local name = vim.api.nvim_buf_get_name(buf)
+-- Lines line1..line2 of a buffer, unsaved edits included, with its name and
+-- filetype.
+---@param range { buf: integer, line1: integer, line2: integer }
+local function capture(range)
+    local buf = range.buf
+    return {
+        name = vim.api.nvim_buf_get_name(buf),
+        filetype = vim.bo[buf].filetype,
+        line1 = range.line1,
+        line2 = range.line2,
+        lines = vim.api.nvim_buf_get_lines(buf, range.line1 - 1, range.line2, false),
+    }
+end
+
+-- Captured lines (see capture()) as a fenced code block headed by their
+-- location, relative to `cwd` when inside it; also returns the location.
+local function snippet(sel, cwd)
+    local name, line1, line2 = sel.name, sel.line1, sel.line2
     local path = name == '' and '[No Name]' or vim.fs.relpath(cwd, name) or name
     local ref = path .. ':' .. line1 .. (line2 ~= line1 and ('-' .. line2) or '')
-    local lines = vim.api.nvim_buf_get_lines(buf, line1 - 1, line2, false)
+    local lines = sel.lines
     local fence = '```'
     for _, l in ipairs(lines) do
         for run in l:gmatch('`+') do
@@ -1326,29 +1420,63 @@ local function snippet(buf, line1, line2, cwd)
             end
         end
     end
-    local block = { ref, fence .. vim.bo[buf].filetype }
+    local block = { ref, fence .. sel.filetype }
     vim.list_extend(block, lines)
     block[#block + 1] = fence
     return table.concat(block, '\n'), ref
 end
 
 -- The chat, started (or restarted) if needed and shown without leaving the
--- current window; nil if it could not start.
-local function reveal()
+-- current window; nil if it could not start, or nil, true while the agent to
+-- start is picked (then retry() runs).
+local function reveal(retry)
     local win = vim.api.nvim_get_current_win()
-    if chat and chat.dead then
-        restart(chat, { agent = chat.opts.name })
-    elseif not chat then
-        start({})
-    end
-    if not chat then
-        return nil
+    local c, picking = ensure(retry)
+    if not c then
+        return nil, picking
     end
     chat.view:open(true)
     if vim.api.nvim_win_is_valid(win) then
         vim.api.nvim_set_current_win(win)
     end
     return chat
+end
+
+-- Send prompt `line` (cmd: its parse) with the captured lines `sel` (see
+-- capture()), or add them to the draft without text; see M.run(). Runs again
+-- once the agent to start is picked.
+local function send_line(line, cmd, sel)
+    local function retry()
+        send_line(line, cmd, sel)
+    end
+    if line == '' and not sel then
+        local buf, picking = open(retry)
+        return buf and true or picking
+    end
+    local c, picking = reveal(retry)
+    if not c then
+        return picking
+    end
+    local block, ref
+    if sel then
+        block, ref = snippet(sel, c.cwd)
+    end
+    if line == '' then
+        local draft = c.view:draft()
+        c.view:set_draft(draft:find('%S') and (draft .. '\n\n' .. block) or block)
+        return M.open() and true
+    end
+    local text = cmd and cmd.text or line
+    if not can_send(c, text) then
+        return
+    end
+    if not block then
+        submit(c, text, line)
+    else
+        local typed = line .. '\n\n' .. block
+        submit(c, text .. '\n\n' .. block, line .. ' [' .. ref .. ']', nil, typed)
+    end
+    return true
 end
 
 -- Run a line typed after :Boomer as if submitted in the chat: `/name args`
@@ -1367,33 +1495,8 @@ function M.run(line, range)
         return warn('Select lines in another buffer', chat)
     elseif cmd and cmd.name then
         return run_command(chat, cmd.name, cmd.args)
-    elseif line == '' and not range then
-        return M.open() and true
     end
-    local c = reveal()
-    if not c then
-        return
-    end
-    local block, ref
-    if range then
-        block, ref = snippet(range.buf, range.line1, range.line2, c.cwd)
-    end
-    if line == '' then
-        local draft = c.view:draft()
-        c.view:set_draft(draft:find('%S') and (draft .. '\n\n' .. block) or block)
-        return M.open() and true
-    end
-    local text = cmd and cmd.text or line
-    if not can_send(c, text) then
-        return
-    end
-    if not block then
-        submit(c, text, line)
-    else
-        local typed = line .. '\n\n' .. block
-        submit(c, text .. '\n\n' .. block, line .. ' [' .. ref .. ']', nil, typed)
-    end
-    return true
+    return send_line(line, cmd, range and capture(range))
 end
 
 -- A copy of the chat status, with the chat buffer (nil without a chat).
