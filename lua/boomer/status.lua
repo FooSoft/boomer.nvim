@@ -199,6 +199,15 @@ function M.usage(st)
     return lines
 end
 
+-- A copy of chat `c`'s status, with its buffer, as handed out by
+-- boomer.status() and the BoomerStatus event.
+---@return boomer.Status
+function M.snapshot(c)
+    local st = vim.deepcopy(c.state)
+    st.buf = c.view.buf
+    return st
+end
+
 -- Redraw and announce a changed status once per event-loop tick, outside the
 -- adapter callback that changed it. `c` is the chat (boomer.init).
 function M.changed(c)
@@ -209,11 +218,9 @@ function M.changed(c)
     vim.schedule(function()
         c.status_pending = false
         pcall(vim.cmd.redrawstatus, { bang = true })
-        local data = vim.deepcopy(c.state)
-        data.buf = c.view.buf
         vim.api.nvim_exec_autocmds(
             'User',
-            { pattern = 'BoomerStatus', modeline = false, data = data }
+            { pattern = 'BoomerStatus', modeline = false, data = M.snapshot(c) }
         )
     end)
 end

@@ -671,6 +671,11 @@ test('system text stays out of the Markdown parse', function()
     local view = new_view()
     local buf = view.buf
     view:open()
+    -- View:exclude_plain wraps this private method of the parser.
+    assert(
+        type(vim.treesitter.get_parser(buf)._parse) == 'function',
+        'LanguageTree:_parse() is gone; see View:exclude_plain()'
+    )
     -- Types of the Markdown nodes at the start of the row holding `needle`,
     -- as parsed for highlighting, or in `trees`.
     local function nodes(needle, trees)

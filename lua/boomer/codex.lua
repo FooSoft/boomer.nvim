@@ -5,14 +5,11 @@
 -- staged locally and sent with the next turn/start, which is how the Codex TUI
 -- does it. Collaboration modes (plan mode) need the experimental API.
 -- Implements the client interface described in boomer.init.
-local Rpc = require('boomer.rpc')
+local adapter = require('boomer.adapter')
 local util = require('boomer.util')
 local M = {}
 
----@class boomer.Codex : boomer.Client
----@field rpc boomer.Rpc
----@field on boomer.Callbacks
----@field profile boomer.Profile
+---@class boomer.Codex : boomer.Adapter
 ---@field models table[] model/list data, fetched at startup.
 ---@field model? string Staged by the user for the next turn.
 ---@field effort? string Staged by the user for the next turn.
@@ -25,11 +22,9 @@ local M = {}
 ---@field title? string
 ---@field limits? boomer.Limits Account rate limits, merged from reads and updates.
 ---@field turn? { cb: fun(err: table?, status: string?), id: string?, cancel: function?, interrupting: boolean? }
----@field requests table<any, boomer.Permission> Open approval requests by RPC ID.
 ---@field changes table<string, table[]> Latest changes of the turn's fileChange items, by item ID.
 ---@field shown table<string, boolean> fileChange items whose diff was shown.
-local Codex = {}
-Codex.__index = Codex
+local Codex = adapter.class()
 
 -- Start the app server, initialize it and fetch its models; cb(err) runs when
 -- it is ready. Profile args follow the fixed server arguments.
@@ -38,37 +33,13 @@ Codex.__index = Codex
 ---@param cb fun(err: { message: string }?)
 ---@return boomer.Codex?, string?
 function M.start(profile, on, cb)
-    local self = setmetatable({
-        on = on,
-        requests = {},
-        changes = {},
-        shown = {},
-        profile = profile,
-        models = {},
-    }, Codex)
-    local rpc, err = Rpc.start({
-        cmd = vim.list_extend(
-            { profile.command, 'app-server', '--listen', 'stdio://' },
-            vim.deepcopy(profile.args or {})
-        ),
-        cwd = profile.cwd,
-        env = profile.env,
-        notify = function(method, params)
-            self:notification(method, params)
-        end,
-        request = function(method, params, reply, id)
-            self:server_request(method, params, reply, id)
-        end,
-        log = on.error,
-        exit = function(msg)
-            on.exit(msg)
-            self:finish({ message = msg })
-        end,
-    })
-    if not rpc then
+    local cmd =
+        vim.list_extend({ profile.command, 'app-server', '--listen', 'stdio://' }, profile.args)
+    local self, err = adapter.spawn(Codex, { on = on, profile = profile, models = {} }, cmd)
+    if not self then
         return nil, err
     end
-    self.rpc = rpc
+    local rpc = self.rpc
     rpc:request('initialize', {
         clientInfo = { name = 'boomer', version = '0.1.0' },
         capabilities = { experimentalApi = true },
@@ -90,8 +61,8 @@ function M.start(profile, on, cb)
     return self
 end
 
-function Codex:close(force)
-    self.rpc:close(force)
+function Codex:reset_turn()
+    self.changes, self.shown = {}, {}
 end
 
 -- Show the user and agent messages of a loaded thread's turns.
@@ -417,16 +388,6 @@ function Codex:cancel(cb)
     end
 end
 
-function Codex:finish(err, status)
-    local turn = self.turn
-    if turn then
-        self.turn = nil
-        self.changes, self.shown = {}, {}
-        self:settle_requests()
-        turn.cb(err, status)
-    end
-end
-
 -- Thread items shown as tool lines, and the field that titles them.
 local tools = {
     commandExecution = 'command',
@@ -676,15 +637,7 @@ function Codex:server_request(method, p, reply, id)
     if method == 'item/fileChange/requestApproval' then
         req.diffs = self:take_diffs(p.itemId)
     end
-    req.reply = function(result)
-        if not req.done then
-            req.done = true
-            self.requests[id] = nil
-            reply(nil, result)
-        end
-    end
-    self.requests[id] = req
-    self.on.permission(req)
+    self:ask(id, req, reply)
 end
 
 -- Model, effort, mode and permissions.

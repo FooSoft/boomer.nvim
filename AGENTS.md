@@ -26,7 +26,8 @@ keep guards and callbacks expanded across lines rather than one-liners).
 
 - `plugin/boomer.lua` defines only `:Boomer`; everything else is lazily required.
 - `lua/boomer/init.lua` owns the single global chat (`boomer.Chat`): the
-  client, its session, the view, the permission queue and the prompt queue.
+  client, its session, the view, the permission queue (`c.requests`) and the
+  prompt queue (`c.prompts`).
   `:[range]Boomer {line}` is handled like a submitted draft (`M.run`: a prompt,
   with the range's lines appended, or a `/command`); all commands dispatch
   here. The **adapter
@@ -34,7 +35,9 @@ keep guards and callbacks expanded across lines rather than one-liners).
   (`boomer.Callbacks`) are documented as LuaCATS classes at the top of this file.
 - Adapters `lua/boomer/codex.lua` and `lua/boomer/acp.lua` implement
   `boomer.Client`. `config.protocols` maps a profile's `protocol` to its adapter
-  module. Their semantics differ:
+  module. Both are classes made by `lua/boomer/adapter.lua`, which owns
+  spawning the agent, ending a turn (`finish`) and tracking permission
+  requests (`ask`). Their semantics differ:
   - Codex: a session is a thread; model/effort/mode/permissions are *staged
     locally* and sent with the next `turn/start`. Models are listed once at
     startup (`model/list`), so settings are always available synchronously.
@@ -56,11 +59,11 @@ keep guards and callbacks expanded across lines rather than one-liners).
   output. Highlights use extmarks in two namespaces (`boomer` for transcript,
   `boomer.prompt` for live prompt decorations); nothing else tracks positions.
 - `lua/boomer/commands.lua`: slash-command parsing, the `builtins` table, user
-  prompt templates and completion. Each builtin's `gate` names a precondition
-  checked by `blocked()` in `init.lua` (`none`, `session`, `idle`, `queue`,
-  `switch`). A builtin `name` is executed by calling
+  prompt templates and completion. A builtin `name` is executed by calling
   `M[name]` in `init.lua`, so adding one means a `builtins` entry plus a
-  matching `M.<name>` function.
+  matching `M.<name>` function, which checks its own precondition with
+  `check(c, gate)` (`blocked()` in `init.lua` lists the gates: `none`,
+  `session`, `idle`, `queue`, `switch`).
 - The prompt queue (`c.prompts`, `boomer.Queued`) holds only prompts
   (`{ text, line }`) for the agent; Boomer's own commands are never queued,
   they run at once or warn. Every command that runs echoes its resolved line

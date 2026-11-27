@@ -102,6 +102,20 @@ function M.shown(list)
     return #out > 0 and out or nil
 end
 
+-- A Markdown code fence that `lines` cannot close: longer than any run of
+-- backticks in them, and at least three.
+---@param lines string[]
+---@return string
+function M.fence(lines)
+    local ticks = 2
+    for _, l in ipairs(lines) do
+        for run in l:gmatch('`+') do
+            ticks = math.max(ticks, #run)
+        end
+    end
+    return ('`'):rep(ticks + 1)
+end
+
 -- Compact token counts: 950, 12.3k, 1.2M.
 ---@param n any
 ---@return string

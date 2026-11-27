@@ -6,14 +6,11 @@
 -- agent's session config options (plus legacy session modes and models),
 -- changed on the agent immediately. Implements the client interface described
 -- in boomer.init.
-local Rpc = require('boomer.rpc')
+local adapter = require('boomer.adapter')
 local util = require('boomer.util')
 local M = {}
 
----@class boomer.Acp : boomer.Client
----@field rpc boomer.Rpc
----@field on boomer.Callbacks
----@field profile boomer.Profile
+---@class boomer.Acp : boomer.Adapter
 ---@field caps table agentCapabilities from initialize.
 ---@field options? table[] The session's configOptions, as last reported.
 ---@field modes? table Legacy session modes: { currentModeId, availableModes }.
@@ -21,12 +18,9 @@ local M = {}
 ---@field title? string
 ---@field loading? boolean A session/load is replaying history.
 ---@field early? table[] session/update params that arrived before session/new returned.
----@field turn? { cb: fun(err: table?, status: string?) }
----@field requests table<any, boomer.Permission> Open permission requests by RPC ID.
 ---@field tools table<string, string> Tool call titles by ID, for failure lines.
 ---@field shown table<string, boolean> Files (tool call ID .. "\0" .. path) whose diff was shown.
-local Acp = {}
-Acp.__index = Acp
+local Acp = adapter.class()
 
 local cancelled = { outcome = { outcome = 'cancelled' } }
 
@@ -37,38 +31,12 @@ local cancelled = { outcome = { outcome = 'cancelled' } }
 ---@param cb fun(err: { message: string }?)
 ---@return boomer.Acp?, string?
 function M.start(profile, on, cb)
-    local self =
-        setmetatable({ on = on, requests = {}, tools = {}, shown = {}, profile = profile }, Acp)
-    local rpc, err = Rpc.start({
-        cmd = vim.list_extend({ profile.command }, vim.deepcopy(profile.args or {})),
-        cwd = profile.cwd,
-        env = profile.env,
-        jsonrpc = true,
-        notify = function(method, params)
-            if method ~= 'session/update' then
-                return
-            elseif params.sessionId == self.session then
-                self:update(params.update or {})
-            elseif self.early then
-                -- Agents may announce a new session (such as its commands)
-                -- before session/new returns its ID; open() replays these.
-                self.early[#self.early + 1] = params
-            end
-        end,
-        request = function(method, params, reply, id)
-            self:server_request(method, params, reply, id)
-        end,
-        log = on.error,
-        exit = function(msg)
-            on.exit(msg)
-            self:finish({ message = msg })
-        end,
-    })
-    if not rpc then
+    local cmd = vim.list_extend({ profile.command }, profile.args)
+    local self, err = adapter.spawn(Acp, { on = on, profile = profile }, cmd, true)
+    if not self then
         return nil, err
     end
-    self.rpc = rpc
-    rpc:request('initialize', {
+    self.rpc:request('initialize', {
         protocolVersion = 1,
         clientCapabilities = vim.empty_dict(),
         clientInfo = { name = 'boomer', version = '0.1.0' },
@@ -82,8 +50,20 @@ function M.start(profile, on, cb)
     return self
 end
 
-function Acp:close(force)
-    self.rpc:close(force)
+function Acp:reset_turn()
+    self.tools, self.shown = {}, {}
+end
+
+function Acp:notification(method, params)
+    if method ~= 'session/update' then
+        return
+    elseif params.sessionId == self.session then
+        self:update(params.update or {})
+    elseif self.early then
+        -- Agents may announce a new session (such as its commands) before
+        -- session/new returns its ID; open() replays these.
+        self.early[#self.early + 1] = params
+    end
 end
 
 -- Shared by session/new and session/load. A loaded session's history arrives
@@ -132,7 +112,7 @@ function Acp:new_session(cwd, cb)
                 todo[#todo + 1] = { key = key, value = self.profile[key] }
             end
         end
-        local raw = vim.tbl_keys(self.profile.options or {})
+        local raw = vim.tbl_keys(self.profile.options)
         table.sort(raw)
         for _, id in ipairs(raw) do
             todo[#todo + 1] = { id = id, value = self.profile.options[id] }
@@ -351,16 +331,8 @@ function Acp:cancel()
     end
 end
 
-function Acp:finish(err, status)
-    local turn = self.turn
-    if turn then
-        self.turn = nil
-        self.tools, self.shown = {}, {}
-        self:settle_requests()
-        turn.cb(err, status)
-    end
-end
-
+-- Answer outstanding requests as cancelled (before a cancel, or after the
+-- turn ended).
 function Acp:settle_requests()
     for _, req in pairs(self.requests) do
         req.reply(cancelled)
@@ -395,15 +367,7 @@ function Acp:server_request(method, p, reply, id)
         end
     end
     req.deny = req.deny or cancelled
-    req.reply = function(result)
-        if not req.done then
-            req.done = true
-            self.requests[id] = nil
-            reply(nil, result)
-        end
-    end
-    self.requests[id] = req
-    self.on.permission(req)
+    self:ask(id, req, reply)
 end
 
 -- Select options may be grouped; flatten them to "Group / Name" labels.

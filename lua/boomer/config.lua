@@ -198,30 +198,15 @@ function M.set(opts)
             error('boomer: agents.' .. name .. ' needs `protocol` and `command`', 0)
         end
     end
-    local agent = opts.agent
-    if agent and not agents[agent] then
-        error('boomer: unknown agent: ' .. agent, 0)
+    if opts.agent and not agents[opts.agent] then
+        error('boomer: unknown agent: ' .. opts.agent, 0)
     end
 
-    local o = vim.tbl_deep_extend('force', vim.deepcopy(defaults), {
-        window = opts.window,
-        labels = opts.labels,
-        signs = type(opts.signs) == 'table' and opts.signs or nil,
-    })
-    if opts.signs == false then
-        o.signs = false
+    local o = vim.tbl_deep_extend('force', vim.deepcopy(defaults), vim.deepcopy(opts))
+    if opts.signs == true then
+        o.signs = vim.deepcopy(defaults.signs)
     end
-    -- These replace the defaults as a whole rather than being merged into them
-    -- (a float `border` list, for example).
-    o.window.float = vim.deepcopy(opts.window and opts.window.float or {})
-    o.commands = vim.deepcopy(opts.commands or {})
-    if opts.winbar ~= nil then
-        o.winbar = opts.winbar
-    end
-    if opts.diff_lines ~= nil then
-        o.diff_lines = opts.diff_lines
-    end
-    o.agent, o.agents = agent, agents
+    o.agents = agents
     M.options = o
 end
 

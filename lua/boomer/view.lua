@@ -13,6 +13,7 @@
 -- (View:decorate); extmarks in `plain_ns` span system blocks, which are left
 -- out of the Markdown parse (View:exclude_plain). Nothing else tracks positions.
 local api = vim.api
+local util = require('boomer.util')
 local ns = api.nvim_create_namespace('boomer')
 local sign_ns = api.nvim_create_namespace('boomer.sign')
 local prompt_ns = api.nvim_create_namespace('boomer.prompt')
@@ -534,9 +535,10 @@ function View:exclude_plain()
     if not parser then
         return
     end
-    if self.parser ~= parser then
+    local parse = parser._parse
+    -- `_parse` is private: without it, regions are only set on changes.
+    if self.parser ~= parser and type(parse) == 'function' then
         self.parser = parser
-        local parse = parser._parse
         parser._parse = function(tree, range, ...)
             if self.parser == parser and self:valid() then
                 self:exclude_plain()
@@ -653,22 +655,16 @@ function View:diff(diffs)
         return
     end
     local lines = block_lines(self, diffs, self.diff_lines)
-    -- The fence is longer than any run of backticks in the diff, which would
-    -- close it otherwise.
-    local ticks = 2
-    for _, l in ipairs(lines) do
-        for run in l[1]:gmatch('`+') do
-            ticks = math.max(ticks, #run)
-        end
+    local function texts()
+        return vim.tbl_map(function(l)
+            return l[1]
+        end, lines)
     end
-    local fence = ('`'):rep(ticks + 1)
+    local fence = util.fence(texts())
     table.insert(lines, 1, { fence .. 'diff', 'fence' })
     lines[#lines + 1] = { fence, 'fence' }
     self:open_block()
-    local texts = vim.tbl_map(function(l)
-        return l[1]
-    end, lines)
-    local row, col = self:append(table.concat(texts, '\n') .. '\n')
+    local row, col = self:append(table.concat(texts(), '\n') .. '\n')
     local function mark(i, start, stop, opts)
         opts.end_row, opts.end_col = row + i - 1, (i == 1 and col or 0) + stop
         api.nvim_buf_set_extmark(self.buf, ns, row + i - 1, (i == 1 and col or 0) + start, opts)

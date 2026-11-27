@@ -6,33 +6,21 @@
 -- the agent advertises (sent to it as prompt text).
 local M = {}
 
--- `gate` names the precondition checked before the command runs (see
--- blocked() in init.lua).
+-- Each builtin runs as M[name] in boomer.init; one with a `hint` takes an
+-- argument.
 M.builtins = {
-    model = { desc = 'Choose the model', hint = '[model]', gate = 'session' },
-    effort = { desc = 'Choose the reasoning effort', hint = '[level]', gate = 'session' },
-    mode = {
-        desc = 'Choose the session mode (such as Agent or Plan)',
-        hint = '[mode]',
-        gate = 'session',
-    },
-    permissions = {
-        desc = 'Choose what the agent may do without asking',
-        hint = '[preset]',
-        gate = 'session',
-    },
-    compact = {
-        desc = 'Summarize the conversation to free context',
-        hint = '[focus]',
-        gate = 'session',
-    },
-    usage = { desc = 'Show context, token and cost usage', gate = 'session' },
-    resume = { desc = 'Load a saved session', hint = '[id]', gate = 'switch' },
-    new = { desc = 'Start a new session', gate = 'switch' },
-    agent = { desc = 'Switch to another agent', hint = '[name]', gate = 'switch' },
-    help = { desc = 'List commands', gate = 'none' },
-    cancel = { desc = 'Cancel the active turn; queued prompts return to the draft', gate = 'none' },
-    close = { desc = 'Stop the agent and wipe the chat', gate = 'none' },
+    model = { desc = 'Choose the model', hint = '[model]' },
+    effort = { desc = 'Choose the reasoning effort', hint = '[level]' },
+    mode = { desc = 'Choose the session mode (such as Agent or Plan)', hint = '[mode]' },
+    permissions = { desc = 'Choose what the agent may do without asking', hint = '[preset]' },
+    compact = { desc = 'Summarize the conversation to free context', hint = '[focus]' },
+    usage = { desc = 'Show context, token and cost usage' },
+    resume = { desc = 'Load a saved session', hint = '[id]' },
+    new = { desc = 'Start a new session' },
+    agent = { desc = 'Switch to another agent', hint = '[name]' },
+    help = { desc = 'List commands' },
+    cancel = { desc = 'Cancel the active turn; queued prompts return to the draft' },
+    close = { desc = 'Stop the agent and wipe the chat' },
 }
 
 -- nil for plain text; { text = ... } for `//text` (sent as `/text`);
